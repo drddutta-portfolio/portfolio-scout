@@ -87,8 +87,9 @@ Phase 1 supports only deterministic, explicitly-specified effects (split with ra
 
 ### Deterministic engines in Phase 1
 Live now (only portfolio and transaction data exists):
-- **Position Sizing** — current weight vs target, min/max breach, drift; suggests ADD / HOLD / REDUCE / TRIM_INTO_STRENGTH / FREEZE from sizing evidence only, labelled "sizing, not selection". Weight is quantity-based; anything needing cost basis reads INSUFFICIENT_DATA.
-- **Portfolio Fit / Concentration** — position, role and (where sector known) sector concentration vs configured limits.
+- **Position Sizing** — Phase 1 stores and displays role, target weight, minimum, maximum and freeze status only. Actual portfolio weight is market value / total portfolio market value, so with no market data it reads UNAVAILABLE. **Quantity share is never used as a weight substitute**, and no ADD / REDUCE / TRIM / HOLD recommendation is issued in Phase 1 — every recommendation that needs actual weight returns INSUFFICIENT_DATA.
+- **Portfolio Fit / Concentration** — count-based and role-based concentration only (e.g. names per role, per broker, per sector where known). Value-based concentration reads INSUFFICIENT_DATA until market data exists.
+
 - **Movement Radar** — page live, driven by sizing/concentration/role-mismatch signals, with an explicit anti-churn rule (a signal must persist across N observations before a role change is proposed) and mandatory human confirmation.
 - **Exit Radar** — page live, vocabulary distinct from Reduce/Sell; Phase 1 raises only hard evidence-backed flags (role/thesis mismatch, data-integrity breaks) and states plainly that fundamental and credit exit signals arrive in Phases 3–4.
 
@@ -145,8 +146,13 @@ src/routes/
   index.tsx                  public landing + sign-in CTA
   auth.tsx                   sign in / reset password
   _authenticated/route.tsx   session gate
-    dashboard.tsx            value (quantity-based), role mix, Core count vs ~35,
-                             data-quality banner, alerts
+    dashboard.tsx            counts only: holdings count, holdings by role,
+                             Core count vs ~35, holdings by broker/account,
+                             asset class by count, unresolved securities,
+                             import/data-quality status, NEEDS_REVIEW and
+                             UNRELIABLE holdings, credit coverage status;
+                             market-value tiles read "Market data not yet connected"
+
     holdings.tsx             dense sortable/filterable table, role + quality chips
     core.tsx satellite.tsx thematic.tsx watchlist.tsx
     stock.$securityId.tsx    Stock Detail (tabbed)
@@ -206,7 +212,7 @@ Market/broker adapter (Angel One), research/fundamental adapter (Trendlyne), liv
 1. **Supabase connection is still the hard blocker.** Nothing backend can be built until your dedicated project's URL and publishable key are stored as secrets. Please confirm when done.
 2. **Router.** Spec asks React + Vite + TypeScript (satisfied); this template is fixed to TanStack Router/Start rather than react-router. I'll follow the template.
 3. **RPC vs Edge Function.** Spec allows either "where justified". I read the trusted commit as a Postgres SECURITY DEFINER RPC — atomic, no service-role key, no extra deployment — which also satisfies amendment 4.
-4. **Dashboard portfolio value** cannot show market value until Phase 2 market data exists; Phase 1 shows quantities, weights by quantity, and an explicit "market value unavailable" state rather than a fabricated figure. Confirm that is acceptable.
+4. **Resolved:** market value, market-value allocation and market-value P&L are absent from Phase 1. The dashboard shows count-based facts only, and every market-value metric shows "Market data not yet connected" / INSUFFICIENT_DATA until Phase 2. Quantity share is never presented as portfolio weight.
 5. **Sample import file.** Column mapping and validation will be materially better if you share one real or redacted broker export early.
 6. **Split/bonus ratios** must be present explicitly on the transaction or a corporate-action record; otherwise the affected holding is marked unreliable.
 7. **"Approximately 35 Core"** stays a soft configurable target with no automatic enforcement.
