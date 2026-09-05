@@ -7,7 +7,7 @@ Rules (from the Database Architecture and Development Rules documents):
 
 1. Inspect the live schema before proposing a change.
 2. Propose the bounded migration and get approval.
-3. Apply it as a single sequential file in `supabase/migrations/`.
+3. Apply it as a single sequential file in `db/migrations/`.
 4. Verify the remote schema, grants, RLS state and policy list.
 5. Record the result in the table below, including a rollback note.
 6. A migration is never considered applied because it appears in a document.
