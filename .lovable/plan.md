@@ -1,4 +1,4 @@
-# PortfolioAI — Phase 0 and Phase 1 Plan
+# PortfolioAI — Phase 0 and Phase 1 Plan (Revision 2, amendments incorporated)
 
 ## 1. Understanding of PortfolioAI
 
@@ -13,169 +13,208 @@ Non-negotiables carried into every design decision below:
 - Engine conflicts stay visible; no single opaque master score.
 - Position sizing is separate from stock selection. The investor decides.
 
-## 2. Current state (verified this turn)
+## 2. Amendments accepted (Revision 2)
+
+1. Canonical accounting numerics are `numeric(38,18)`; display formatting is a UI concern only.
+2. **No cost-basis method is hard-coded.** No FIFO, no average cost, no estimation in Phase 1. Quantity derivation proceeds independently; cost basis / realized / unrealized P&L return `INSUFFICIENT_DATA` until you approve a methodology.
+3. Strict secrets policy across the whole project (Section 8).
+4. No service-role key in Phase 0/1; trusted writes go through a hardened SECURITY DEFINER RPC.
+5. No placeholder tables — physical objects only where Phase 1 genuinely needs them. Credit Intelligence is the deliberate exception.
+6. Conservative corporate-action handling with explicit NEEDS_REVIEW / UNRELIABLE / INSUFFICIENT_DATA states.
+7. Multi-portfolio schema, single default active portfolio in the Phase 1 UI.
+8. Credit Intelligence data model retained in full, coverage states neutral.
+9. Versioned engine interfaces with honest INSUFFICIENT_DATA; engine families stay separable.
+10. Infrastructure verification gate before any migration.
+
+## 3. Current state (verified)
 
 - Repository is the fresh Lovable starter: React 19 + TypeScript + Vite 7 + TanStack Router/Start + Tailwind v4 + shadcn/ui. Only the placeholder home page exists.
-- No `src/integrations/`, no Supabase client, no schema, no migrations, no auth — nothing from the spec is implemented.
-- Lovable Cloud is **not** enabled, which matches the spec's "no Lovable Cloud backend" rule.
+- No `src/integrations/`, no Supabase client, no schema, no migrations, no auth, no `.env.example`, no secrets configured.
+- Lovable Cloud is **not** enabled, matching the "no Lovable Cloud backend" rule.
 
-Two things must be resolved by you before any backend code is written (see Section 12): connecting your own Supabase project's credentials, and confirming the GitHub repo connection.
-
-## 3. Architecture summary
+## 4. Architecture summary
 
 ```text
 Browser (React/TS, TanStack Router)
-  |  supabase-js with publishable key  -> RLS-scoped reads/writes (own data only)
-  |  server functions (server-side)    -> trusted writes: import commit, engine runs
+  |  supabase-js, publishable key only  -> RLS-scoped reads; NO direct ledger writes
+  |  server functions (server-side)     -> call restricted RPCs
   v
 Your dedicated Supabase project
   Auth (email/password, signup disabled)
-  Postgres: identity/config, ledger, import staging, market, research,
-            engine results, decisions/audit
-  RLS on every user-owned table + hardened SECURITY DEFINER commit RPC
+  Postgres: identity/config, ledger, import staging, roles, engines, credit intelligence
+  commit_import_batch() : SECURITY DEFINER, empty search_path, EXECUTE to authenticated
 External document storage (Drive/S3): large PDFs; Supabase keeps metadata + checksum + link
 ```
 
-Layering in code: `providers` (vendor adapters, later phases) → `domain` (pure deterministic engines, no I/O) → `data` (Supabase queries/server functions) → `features` (UI). Engines are pure TypeScript functions with versioned config so results are reproducible and testable.
+Code layering: `providers` (vendor adapters, later phases) → `domain` (pure deterministic engines and derivation, no I/O, unit-tested) → `data` (queries + server functions) → `features` (UI).
 
-## 4. Phase 0 — Architecture and Setup
+## 5. Phase 0 implementation sequence
 
-1. Connect the dedicated GitHub repository and confirm sync.
-2. Connect your dedicated Supabase project: store `SUPABASE_URL`, publishable/anon key, and (server-only) service key as project secrets; never in client code or git.
-3. Create `src/integrations/supabase/client.ts` (browser, RLS) and a server-only client used exclusively inside server functions.
-4. Inspect the live schema and record that it is empty; establish the migration ledger under `supabase/migrations/` with sequential, reversible, documented migrations, plus `docs/` copies of the four specs and a `docs/migrations.md` register.
-5. App shell: professional dark "terminal" design system in `src/styles.css` (semantic tokens only, dense tabular type, no default AI-purple), left nav with all 13 target sections — later-phase sections rendered as honest "Phase N" placeholders, not hidden.
-6. Route skeleton, auth gate, error/not-found boundaries, `head()` metadata per route.
-7. Test harness (Vitest) wired so engines are unit-testable from day one.
+1. **Infrastructure gate** (nothing else starts until all pass):
+   - dedicated GitHub repository connected and syncing;
+   - dedicated Supabase project connected;
+   - Supabase confirmed as database/auth/backend, Lovable Cloud left disabled;
+   - live Supabase schema inspected and recorded (expected: empty `public`);
+   - secret storage configured and verified;
+   - repository scanned to confirm no secret values in tracked files.
+2. Secret/environment architecture + `.env.example` (names and empty placeholders only) + `.gitignore` hardening.
+3. `src/integrations/supabase/client.ts` (browser, publishable key, RLS) and a server-side client used only inside server functions. No service-role client created.
+4. Migration discipline: `supabase/migrations/` with sequential reversible files, `docs/` copies of the four specs, `docs/migrations.md` register recording name, purpose, objects, RLS impact, rollback note and remote-verification result.
+5. App shell: professional dark terminal design system in `src/styles.css` (semantic tokens, dense tabular type — no default AI look), left navigation with all 13 target sections, later-phase sections rendered as honest "Phase N" pages.
+6. Route skeleton, auth gate, error/not-found boundaries, per-route `head()` metadata.
+7. Vitest harness so domain logic is testable from the first commit.
 
-## 5. Phase 1 — Foundation (scope)
-
-Authentication → core schema + RLS → brokers/accounts/securities → transaction ledger → import pipeline → derived holdings → Dashboard/Holdings/Stock Detail → first deterministic engines → Position Sizing / Movement Radar / Exit Radar in their honest initial form.
+## 6. Phase 1 implementation plan
 
 ### Authentication
-Supabase Auth email/password. Public signup disabled (owner account provisioned by you in the Supabase dashboard). Password reset, persistent session, logout, protected `_authenticated` route subtree, public `/auth` page. Authorization is RLS, independent of the login UI.
+Supabase Auth email/password. Public signup disabled; owner account provisioned by you in the Supabase dashboard. Password reset, persistent session, logout, protected `_authenticated` subtree, public `/auth` page. Authorization is RLS, independent of the login UI.
 
 ### Import workflow
-Upload (XLSX/XLS/CSV/Google-Sheet export, parsed in-browser) → Preview raw grid → Column mapping (with a saveable mapping profile per broker) → Validation row-by-row (types, dates, signs, required fields; unknown date stays NULL and flags NEEDS_REVIEW) → Security & asset-class identification (match to `securities`, else user resolves; never guessed silently) → Duplicate/conflict detection (row checksum vs previous batches; near-duplicate same security+date+qty+price warning) → User confirmation of the exact approved rows → **Trusted commit** via one server-side RPC.
+Upload (XLSX/XLS/CSV/Google-Sheet export, parsed in-browser) → Preview raw grid → Column mapping (saveable profile per broker) → Validation per row (types, dates, signs, required fields; unknown date stays NULL and flags NEEDS_REVIEW) → Security & asset-class identification against `securities`/`security_aliases`, unmatched rows resolved by you, never guessed → Duplicate/conflict detection (row checksum against prior batches; near-duplicate warning on same security+date+qty+price) → Confirmation of the exact approved rows → **Trusted commit**.
 
-Trusted commit contract: the browser sends only batch id, approved source-row ids and an idempotency token. The server re-checks auth and ownership, locks the batch row, rechecks state, re-validates every approved row server-side, inserts at most one transaction per source row, writes lineage `transaction.source_row_id`, and atomically marks the batch COMMITTED. Batch lifecycle: UPLOADED → PREVIEWED → VALIDATED → AWAITING_CONFIRMATION → COMMITTING → COMMITTED (REJECTED / FAILED).
+Trusted commit contract: the browser sends only batch id, approved source-row ids, idempotency token. The RPC re-checks `auth.uid()`, re-checks ownership, locks the batch row, rechecks state, re-validates every approved row server-side, inserts at most one transaction per source row, writes lineage, and atomically marks the batch COMMITTED. Lifecycle: UPLOADED → PREVIEWED → VALIDATED → AWAITING_CONFIRMATION → COMMITTING → COMMITTED (REJECTED / FAILED).
 
-### Derived holdings
-A `current_holdings` view (plus a documented pure-TS mirror for testing) folds ACTIVE transactions per portfolio+security+account: explicit quantity effect per type (BUY/OPENING_POSITION/TRANSFER_IN/BONUS +, SELL/TRANSFER_OUT −, SPLIT ratio-applied only when a ratio is present, ADJUSTMENT/REVERSAL explicit). Any unresolved SPLIT/ADJUSTMENT/REVERSAL marks the holding `UNRELIABLE` and the UI shows it — no guessing. Cost basis and P&L are computed (FIFO, documented) **only** when every contributing transaction has price and date; otherwise the cell reads "insufficient data", not 0.
+### Derived holdings — quantity only in Phase 1
+`current_holdings` view (plus a pure-TS mirror for unit tests) folds ACTIVE transactions per portfolio + security + account with an explicit quantity effect per type: BUY / OPENING_POSITION / TRANSFER_IN / BONUS increase; SELL / TRANSFER_OUT decrease; SPLIT applies only with an explicit ratio; ADJUSTMENT / REVERSAL only with explicit semantics. Anything unresolved marks the holding `UNRELIABLE` or `NEEDS_REVIEW` and the UI says so.
+
+**Cost basis and P&L are not computed in Phase 1.** An `accounting_method` interface (versioned, replaceable, selected by config — not by code) is defined with a single Phase 1 implementation that returns `INSUFFICIENT_DATA` with the reasons (no approved methodology; possibly incomplete history behind an opening position). No FIFO, no average cost, no estimate, no zero, no fabricated acquisition cost. Opening positions are explicitly treated as possibly-incomplete history. A future approved method plugs in behind the same interface without touching the ledger.
+
+### Corporate actions (conservative)
+Phase 1 supports only deterministic, explicitly-specified effects (split with ratio, bonus with ratio, transfers, symbol/ISIN change as identity mapping). Rights, merger, demerger, spin-off and buyback are modelled as recognised action types that Phase 1 records but refuses to fold into quantities — they raise NEEDS_REVIEW on affected holdings. Nothing is inferred silently.
 
 ### Roles and classification
-`portfolio_security_settings` holds role (CORE / SATELLITE / THEMATIC / WATCHLIST / UNASSIGNED), target weight, min/max, freeze flag and role-change history. Asset class lives on `securities` (EQUITY, ETF, MF, DEBT, CASH, OTHER) and is never conflated with role. Core target is a configurable **count** (default 35) shown as "n of ~35 Core names".
+`portfolio_security_settings` holds role (CORE / SATELLITE / THEMATIC / WATCHLIST / UNASSIGNED), target weight, min/max, freeze flag; `role_change_history` keeps the audit. Asset class lives on `securities` (EQUITY, ETF, MF, DEBT, CASH, OTHER) and is never conflated with role. Core target is a configurable **count** (default 35), shown as "n of ~35 Core names", never enforced automatically.
 
 ### Deterministic engines in Phase 1
-Implemented with real data available now (portfolio + transactions only):
-- **Position Sizing** — current weight vs target weight, min/max breach, drift; suggests ADD / HOLD / REDUCE / TRIM_INTO_STRENGTH / FREEZE from sizing evidence only, clearly labelled "sizing, not selection".
-- **Portfolio Fit / Concentration** — position, sector (when known) and role concentration vs configured limits.
-- **Core Selection, Quality–Growth, Core Health, Valuation, Momentum, Satellite Opportunity, Risk, Sector, Credit interpretation, Analyst revisions, Movement, Exit Risk** — implemented as versioned engine *interfaces plus registry, config rows, result tables and UI panels*, returning `INSUFFICIENT_DATA` with the list of missing inputs. Nothing is faked.
-- **Movement Radar** — page live in Phase 1, driven by sizing/concentration/role-mismatch signals, with an explicit anti-churn rule (a signal must persist across N observations before proposing a role change) and mandatory human confirmation.
-- **Exit Radar** — page live, separate vocabulary from Reduce/Sell; Phase 1 surfaces only hard, evidence-backed flags (e.g. role/thesis mismatch, data-integrity breaks) and states plainly that thesis-breaking fundamental and credit signals arrive in Phases 3–4.
+Live now (only portfolio and transaction data exists):
+- **Position Sizing** — current weight vs target, min/max breach, drift; suggests ADD / HOLD / REDUCE / TRIM_INTO_STRENGTH / FREEZE from sizing evidence only, labelled "sizing, not selection". Weight is quantity-based; anything needing cost basis reads INSUFFICIENT_DATA.
+- **Portfolio Fit / Concentration** — position, role and (where sector known) sector concentration vs configured limits.
+- **Movement Radar** — page live, driven by sizing/concentration/role-mismatch signals, with an explicit anti-churn rule (a signal must persist across N observations before a role change is proposed) and mandatory human confirmation.
+- **Exit Radar** — page live, vocabulary distinct from Reduce/Sell; Phase 1 raises only hard evidence-backed flags (role/thesis mismatch, data-integrity breaks) and states plainly that fundamental and credit exit signals arrive in Phases 3–4.
+
+Interface + versioned config + result persistence + UI panel, returning `INSUFFICIENT_DATA` with the missing-input list: Core Selection (with the 25/20/15/10/10/5/5/5/5 weighting stored as config, not code), Quality–Growth, Satellite Opportunity, Core Health, Valuation, Momentum, Risk, Sector, Credit interpretation, Analyst revisions. No invented inputs.
 
 ### Credit Intelligence in Phase 1
-Full schema, coverage states and Stock Detail panel are built now. With no provider connected the panel reads NOT_COVERED (neutral, grey — never red), and the architecture already supports agency, instrument, current/previous rating, outlook, watch, action type, effective date, provenance and append-only history.
+Full data model and Stock Detail panel built now: agency, instrument/facility, current rating, previous rating, outlook, rating watch, action type, effective date, provenance/source, append-only history, coverage state. With no provider connected the panel reads NOT_COVERED as a neutral grey state that never reduces any score. No rating is ever fabricated.
 
-## 6. Proposed Supabase schema (Phase 1)
+## 7. Exact Phase 1 database objects and migration sequence
 
-Migration sequence, each bounded and reversible; every `CREATE TABLE` in `public` is followed by explicit GRANTs, then RLS enable, then policies.
+Each migration is bounded and reversible; every `CREATE TABLE` in `public` is followed by explicit GRANTs, then RLS enable, then policies. All money/quantity/price columns are `numeric(38,18)`.
 
 | # | Objects | Purpose |
 |---|---|---|
-| 01 | enums (`asset_class`, `portfolio_role`, `txn_type`, `txn_state`, `data_quality`, `import_batch_state`, `credit_action`, `coverage_state`, `engine_kind`) | shared vocabulary |
-| 02 | `profiles`, `user_settings`, `app_config` | identity, preferences, Core-count target and limits |
-| 03 | `portfolios`, `brokers`, `broker_accounts` | ownership + multi-broker/demat |
-| 04 | `securities` (symbol, exchange, ISIN, name, asset_class, sector, provenance), `security_aliases` | instrument master + import matching |
-| 05 | `transactions` (numeric(24,8) qty/price, nullable date, type, state ACTIVE/SUPERSEDED/REVERSED, data_quality, source_row_id, supersedes_id) | the ledger |
-| 06 | `import_batches`, `import_source_rows` (immutable raw JSONB + normalized + validation result + row checksum) | staging with audit |
-| 07 | `commit_import_batch()` RPC (SECURITY DEFINER, `search_path = ''`, schema-qualified, EXECUTE to `authenticated` only) | trusted commit |
-| 08 | `current_holdings` view (security_invoker), `portfolio_security_settings`, `role_change_history`, `themes`, `security_themes` | derived state + roles |
-| 09 | `engine_definitions`, `engine_versions`, `engine_runs`, `engine_results` (component values JSONB, evidence refs, completeness) | versioned deterministic results |
-| 10 | `credit_observations`, `analyst_observations`, `research_documents` (metadata + external link + checksum), `corporate_actions`, `market_observations` | append-only external evidence |
-| 11 | `recommendations`, `user_decisions`, `investment_thesis` + `thesis_revisions`, `portfolio_snapshots`, `ai_runs` (empty until Phase 5) | decision + audit layer |
+| 01 | enums: `asset_class`, `portfolio_role`, `txn_type`, `txn_state`, `data_quality_state`, `import_batch_state`, `corp_action_type`, `credit_action`, `coverage_state`, `engine_kind`, `sizing_action` | shared vocabulary, no silent strings |
+| 02 | `profiles`, `user_settings`, `app_config` | identity, preferences, Core-count target, concentration limits, selected accounting-method version |
+| 03 | `portfolios`, `brokers`, `broker_accounts` | ownership, multi-broker/demat (multi-portfolio capable, one default active) |
+| 04 | `securities` (symbol, exchange, ISIN, name, asset_class, sector, provenance), `security_aliases` | instrument master + import matching + symbol/ISIN changes |
+| 05 | `transactions` (qty/price `numeric(38,18)`, nullable trade_date, type, state ACTIVE/SUPERSEDED/REVERSED, `data_quality_state`, `supersedes_id`, `source_row_id`), indexes | the ledger |
+| 06 | `import_batches`, `import_source_rows` (immutable raw JSONB + normalized + validation result + row checksum) | staging with full audit and lineage |
+| 07 | `commit_import_batch(...)` — SECURITY DEFINER, `search_path = ''`, schema-qualified, EXECUTE granted to `authenticated` only; `REVOKE ALL` from `public`/`anon` | trusted commit |
+| 08 | `current_holdings` view (security_invoker), `portfolio_security_settings`, `role_change_history`, `corporate_actions` | derived quantities, roles, conservative action records |
+| 09 | `engine_definitions`, `engine_versions`, `engine_runs`, `engine_results` (component values JSONB, evidence refs, completeness/INSUFFICIENT_DATA reasons) | versioned deterministic results |
+| 10 | `credit_observations` (append-only, coverage state), `credit_agencies` reference | first-class Credit Intelligence |
+| 11 | `themes`, `security_themes` | Thematic role support |
 
-Relationships: `portfolios → broker_accounts → transactions`; `securities` referenced by transactions, settings, all evidence tables; `import_source_rows → transactions` gives lineage; `engine_results` keyed by (security, portfolio, engine_version, as_of).
+Relationships: `portfolios → broker_accounts → transactions`; `securities` referenced by transactions, settings, credit observations; `import_source_rows → transactions` gives lineage; `engine_results` keyed by (portfolio, security, engine_version, as_of).
 
-### RLS approach
-- RLS enabled on every table; anon gets nothing on user data.
-- Policies scope by `auth.uid()` — directly where an owner column exists, otherwise via an owning-portfolio EXISTS check.
-- `securities` / `brokers` are shared reference data: SELECT to `authenticated`, writes restricted.
-- `transactions`: SELECT to owner; **no direct client INSERT/UPDATE/DELETE**. Writes only through the commit RPC and (later) a narrow manual-entry server function that always writes an audit trail — corrections supersede rather than overwrite.
-- `import_source_rows` raw data is insert/select by owner, never updatable after validation.
-- Service key stays server-side only; never in the browser bundle or git.
+### Deferred physical objects (architecture kept, tables created in their own phase)
+`market_observations` (Phase 2), `fundamental_observations`, `research_documents`, `analyst_observations` (Phase 3), `portfolio_snapshots`, `recommendations`, `investment_thesis` + `thesis_revisions`, `user_decisions` (Phase 4 unless a Phase 1 surface genuinely needs them), `ai_runs` (Phase 5). None are created empty in Phase 1. Their interfaces, enums and UI surfaces still exist so nothing conceptual is lost.
 
-### Security risks and mitigations
-SECURITY DEFINER privilege escalation → empty search_path, schema-qualified, ownership re-checked inside, EXECUTE narrowly granted. Double-commit → batch state lock + idempotency token + unique lineage constraint. Client-supplied ownership → never trusted; derived from `auth.uid()`. Recursive policies → role/permission checks via a `SECURITY DEFINER` helper function.
+## 8. Secret and environment-variable architecture
 
-## 7. Frontend / page structure
+- **No secret value ever appears in source, docs, tests, fixtures, logs or generated output.** Code references names only.
+- Server-only names (read via `process.env['NAME']` inside server-function handlers only, never at module scope): `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`. Later phases add `ANGEL_ONE_API_KEY`, `TRENDLYNE_API_KEY`, AI provider keys — stored in the secret store when that phase begins, not before.
+- Browser-visible, non-secret: `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`.
+- `SUPABASE_SERVICE_ROLE_KEY` is **not introduced in Phase 0/1**. If a future feature genuinely needs it I will first justify why authenticated/RLS access is insufficient, where it is stored, why it cannot reach the browser, and the minimum privilege required.
+- `.env.example` is committed with names and empty values only. `.gitignore` covers `.env`, `.env.*` (except `.env.example`), and any local credential files.
+- Pre-commit check on any configuration change: grep tracked files for key-shaped values and confirm none are present.
+
+## 9. Security and RLS model
+
+- RLS enabled on every table; anon gets no access to portfolio data.
+- Policies scope by `auth.uid()` directly where an owner column exists, otherwise via an owning-portfolio EXISTS check through a `SECURITY DEFINER` helper to avoid recursive policies.
+- `securities`, `brokers`, `credit_agencies` are shared reference data: SELECT to `authenticated`; writes restricted.
+- `transactions`: SELECT to owner; **no client INSERT/UPDATE/DELETE grant at all**. Writes only via `commit_import_batch` and (later) a narrow manual-entry RPC that supersedes rather than overwrites and always writes an audit row.
+- `import_source_rows` raw payload is insert/select only — never updatable after validation.
+- Risks and mitigations: definer escalation → empty search_path, schema-qualified, ownership re-checked inside, EXECUTE narrowly granted; double commit → batch lock + idempotency token + unique lineage constraint; client-supplied ownership → never trusted, always derived from `auth.uid()`.
+
+## 10. Frontend / page structure
 
 ```text
 src/routes/
   index.tsx                  public landing + sign-in CTA
   auth.tsx                   sign in / reset password
   _authenticated/route.tsx   session gate
-    dashboard.tsx            portfolio value, role mix, Core count vs ~35,
-                             data-quality banner, top movers, alerts
-    holdings.tsx             dense sortable/filterable table, role & quality chips
+    dashboard.tsx            value (quantity-based), role mix, Core count vs ~35,
+                             data-quality banner, alerts
+    holdings.tsx             dense sortable/filterable table, role + quality chips
     core.tsx satellite.tsx thematic.tsx watchlist.tsx
     stock.$securityId.tsx    Stock Detail (tabbed)
     import.tsx               6-step wizard
     movement.tsx exit.tsx    Movement Radar, Exit Radar
-    screeners.tsx calendar.tsx research.tsx committee.tsx  (Phase placeholders)
+    screeners.tsx calendar.tsx research.tsx committee.tsx  (honest phase pages)
     settings.tsx             brokers, accounts, targets, engine config, provenance
-src/domain/engines/*         pure deterministic engines + registry + versions
-src/domain/holdings/*        pure derivation mirror (unit-tested)
+src/domain/engines/*         pure engines + registry + versions
+src/domain/holdings/*        quantity derivation + accounting-method interface
 src/features/import/*        parse, map, validate, dedupe, confirm
 src/data/*.functions.ts      server functions (trusted writes)
 src/integrations/supabase/*  browser client, server client, generated types
 ```
 
-Stock Detail tabs: Identity & classification | Position & sizing | Fundamental (Core/QG/Health/Valuation) | Market (momentum) | External intelligence (credit, analyst, research, events) | Portfolio (risk, sector, fit) | Thesis & decisions | Evidence & provenance. A persistent "Conflicts" strip shows disagreement across engine families instead of averaging it away.
+Stock Detail tabs: Identity & classification | Position & sizing | Fundamental | Market | External intelligence (credit first-class) | Portfolio (risk, sector, fit) | Thesis & decisions (Phase 4 surface) | Evidence & provenance. A persistent "Conflicts" strip shows disagreement across engine families rather than averaging it away.
 
-### Provenance and data quality in the UI
-Every value carries a state: OK / MISSING / NOT_COVERED / STALE / NEEDS_REVIEW / UNRELIABLE / MANUAL_OVERRIDE. Rendered as a neutral chip with a hover card showing source, provider, observation date and ingestion time. Missing never renders as 0, blank or red.
+### Provenance and data-quality display
+Every value carries a state: OK / MISSING / NOT_COVERED / STALE / NEEDS_REVIEW / UNRELIABLE / INSUFFICIENT_DATA / MANUAL_OVERRIDE, rendered as a neutral chip with a hover card showing source, provider, observation date and ingestion time. Missing never renders as 0, blank or red.
 
-## 8. Storage split
+## 11. Storage split
 
-Supabase: auth, ledger, imports, securities, settings, engine results, evidence metadata, decisions. External storage: annual reports, transcripts, presentations, large PDFs — Supabase keeps type, title, period, source URL, external link, checksum (for dedupe) and ingestion metadata.
+Supabase: auth, ledger, imports, securities, settings, engine results, credit observations. External storage: annual reports, transcripts, presentations, large PDFs — Supabase keeps type, title, period, source URL, external link, checksum and ingestion metadata (from Phase 3).
 
-## 9. GitHub and migration discipline
+## 12. GitHub and migration discipline
 
-One bounded feature per commit, synced through the connected repo. Migrations are sequential SQL files in the repo, applied only after you approve the step, then verified against the live schema (tables, grants, RLS, policy list) and recorded in `docs/migrations.md`. No migration is claimed applied until verified remotely. Rollback notes accompany each file.
+One bounded feature per commit through the connected repo. Migrations are sequential SQL files in the repo, applied only after you approve that step, then verified against the live schema (tables, grants, RLS, policy list, function privileges) and recorded in `docs/migrations.md` with a rollback note. No migration is claimed applied until remotely verified. Configuration commits pass the secret scan first.
 
-## 10. Testing before Phase 1 is "done"
+## 13. Testing before Phase 1 is complete
 
-- Unit tests: holdings derivation across every transaction type incl. split/reversal/adjustment and missing-date rows; FIFO cost basis with and without complete data; Position Sizing and concentration math; import validators and duplicate detection.
-- Integrity tests: commit RPC is idempotent, rejects foreign batches, rejects re-commit, produces exactly one transaction per approved row, lineage complete.
-- Security tests: anon reads blocked; second user cannot read/write first user's rows; direct client transaction INSERT rejected.
-- End-to-end: sign in → import a real sample file → confirm → holdings match a hand-checked expected total → sign out.
-- Honesty check: a deliberately incomplete import shows NEEDS_REVIEW and never a zero.
+- Unit: quantity derivation across every transaction type incl. split/bonus/reversal/adjustment and missing-date rows; accounting-method interface returns INSUFFICIENT_DATA with reasons and never a number; sizing and concentration math; import validators; duplicate detection; `numeric(38,18)` round-trip precision.
+- Integrity: commit RPC is idempotent, rejects foreign batches, rejects re-commit, one transaction per approved row, lineage complete.
+- Security: anon blocked; a second user cannot read or write the owner's rows; direct client transaction INSERT rejected; RPC EXECUTE not available to anon.
+- End-to-end: sign in → import a real sample file → confirm → derived quantities match a hand-checked expectation → sign out.
+- Honesty: a deliberately incomplete import shows NEEDS_REVIEW; P&L shows INSUFFICIENT_DATA; an uncovered stock shows NOT_COVERED in neutral styling.
+- Secret scan: no key-shaped value in tracked files.
 
-## 11. Recommended implementation order
+## 14. Recommended order of implementation
 
-1. Connect Supabase + GitHub, secrets, clients, migration ledger (Phase 0).
-2. Design system + app shell + navigation + route skeleton.
-3. Auth + protected routes + owner account.
-4. Migrations 01–05 (enums, identity, portfolios/brokers/accounts, securities, transactions) with RLS.
-5. Migrations 06–07 + import wizard + trusted commit.
-6. Migration 08 + derived holdings + Holdings page + Dashboard.
-7. Stock Detail shell with all panels and honest empty states.
-8. Migration 09 + engine registry + Position Sizing / Portfolio Fit live; other engines as INSUFFICIENT_DATA.
-9. Migrations 10–11 + Movement Radar, Exit Radar, credit/analyst/research placeholders with real schema.
-10. Test suite, verification pass, documentation.
+1. Phase 0 infrastructure gate + secrets architecture + `.env.example` + `.gitignore` (no migrations).
+2. Supabase clients, migration ledger, docs.
+3. Design system, app shell, navigation, route skeleton.
+4. Auth + protected routes + owner account.
+5. Migrations 01–05 with RLS (enums, identity, portfolios/brokers/accounts, securities, transactions).
+6. Migration 06–07 + import wizard + trusted commit RPC.
+7. Migration 08 + quantity-derived holdings + Holdings page + Dashboard.
+8. Stock Detail shell with honest empty states.
+9. Migration 09 + engine registry; Position Sizing and Portfolio Fit live, others INSUFFICIENT_DATA.
+10. Migration 10–11 + Credit Intelligence panel, Themes, Movement Radar, Exit Radar.
+11. Full test suite, remote verification, documentation update.
 
-## 12. Deferred to later phases
+## 15. Deferred to later phases
 
-Market/broker data adapter (Angel One), research/fundamental adapter (Trendlyne), live credit and analyst feeds, full Core Selection / QG / Health / Valuation / Momentum / Risk / Sector scoring, screeners, calendar automation, AI Brain and Investment Committee, alerts and scheduled refresh, backtesting. All keep their schema, interfaces and UI surfaces in Phase 1.
+Market/broker adapter (Angel One), research/fundamental adapter (Trendlyne), live credit and analyst feeds, approved cost-basis methodology and P&L, full fundamental/valuation/momentum/risk/sector scoring, complex corporate actions (rights, merger, demerger, spin-off, buyback), thesis and decision persistence, screeners, calendar automation, AI Brain / Investment Committee, alerts, backtesting.
 
-## 13. Risks, ambiguities and questions
+## 16. Remaining risks, ambiguities and questions
 
-1. **Supabase connection is a hard blocker.** Lovable Cloud is disabled here, matching your spec, but nothing backend can be built until your dedicated Supabase project's URL and keys are added as project secrets. Please confirm you'll supply them.
-2. **Router.** The spec says React + Vite + TypeScript — satisfied. This template is fixed to TanStack Router/Start (not react-router); I'll follow it.
-3. **Edge Functions vs server functions.** Spec says "Supabase RPC/Edge Functions where justified". The trusted commit is best done as a Postgres SECURITY DEFINER RPC (atomic, no extra deployment) with the app's server functions as the caller. Flagging this as a deliberate reading, not a silent change.
-4. **Cost-basis method** is unspecified. I propose FIFO, documented and versioned; average-cost can be added as a configurable alternative. Please confirm.
-5. **Split handling.** Spec forbids silent inference. Phase 1 requires an explicit ratio on SPLIT transactions or a corporate-action record; otherwise the holding is marked unreliable.
-6. **Multi-portfolio vs single portfolio.** Schema supports many; the UI will default to one active portfolio unless you want a portfolio switcher in Phase 1.
-7. **Sample import file.** Column mapping and validation will be far more accurate if you share one real (or redacted) broker export early.
-8. **"Approximately 35 Core"** is treated as a soft, configurable target with no automatic enforcement.
+1. **Supabase connection is still the hard blocker.** Nothing backend can be built until your dedicated project's URL and publishable key are stored as secrets. Please confirm when done.
+2. **Router.** Spec asks React + Vite + TypeScript (satisfied); this template is fixed to TanStack Router/Start rather than react-router. I'll follow the template.
+3. **RPC vs Edge Function.** Spec allows either "where justified". I read the trusted commit as a Postgres SECURITY DEFINER RPC — atomic, no service-role key, no extra deployment — which also satisfies amendment 4.
+4. **Dashboard portfolio value** cannot show market value until Phase 2 market data exists; Phase 1 shows quantities, weights by quantity, and an explicit "market value unavailable" state rather than a fabricated figure. Confirm that is acceptable.
+5. **Sample import file.** Column mapping and validation will be materially better if you share one real or redacted broker export early.
+6. **Split/bonus ratios** must be present explicitly on the transaction or a corporate-action record; otherwise the affected holding is marked unreliable.
+7. **"Approximately 35 Core"** stays a soft configurable target with no automatic enforcement.
+
+## 17. Confirmation
+
+No API key, token, password, private key or service-role credential will be written into source files, documentation, tests, fixtures or anything committed to GitHub. Code will reference environment-variable names only; values live solely in the secure secret store. The Supabase service-role key will not be introduced in Phase 0 or Phase 1.
+
+## 18. Recommended first implementation task
+
+Phase 0 step 1–4 only: run the infrastructure gate (GitHub + Supabase connection, live schema inspection, secret configuration, repository secret scan), then create the secrets architecture, `.env.example`, `.gitignore` hardening, Supabase clients and the migration ledger — **no migrations, no schema changes.**
