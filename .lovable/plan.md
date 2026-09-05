@@ -212,7 +212,7 @@ Market/broker adapter (Angel One), research/fundamental adapter (Trendlyne), liv
 1. **Supabase connection is still the hard blocker.** Nothing backend can be built until your dedicated project's URL and publishable key are stored as secrets. Please confirm when done.
 2. **Router.** Spec asks React + Vite + TypeScript (satisfied); this template is fixed to TanStack Router/Start rather than react-router. I'll follow the template.
 3. **RPC vs Edge Function.** Spec allows either "where justified". I read the trusted commit as a Postgres SECURITY DEFINER RPC — atomic, no service-role key, no extra deployment — which also satisfies amendment 4.
-4. **Dashboard portfolio value** cannot show market value until Phase 2 market data exists; Phase 1 shows quantities, weights by quantity, and an explicit "market value unavailable" state rather than a fabricated figure. Confirm that is acceptable.
+4. **Resolved:** market value, market-value allocation and market-value P&L are absent from Phase 1. The dashboard shows count-based facts only, and every market-value metric shows "Market data not yet connected" / INSUFFICIENT_DATA until Phase 2. Quantity share is never presented as portfolio weight.
 5. **Sample import file.** Column mapping and validation will be materially better if you share one real or redacted broker export early.
 6. **Split/bonus ratios** must be present explicitly on the transaction or a corporate-action record; otherwise the affected holding is marked unreliable.
 7. **"Approximately 35 Core"** stays a soft configurable target with no automatic enforcement.
