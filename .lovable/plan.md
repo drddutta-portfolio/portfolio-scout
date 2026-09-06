@@ -6,7 +6,7 @@ File: `db/migrations/0003_portfolio_foundation.sql`
 
 ## Decisions
 
-**brokers = shared reference data.** Zerodha, Motilal Oswal, Angel One etc. are the same entity for every user; per-user copies would fragment identity and block later mapping of imports to a canonical broker. Table is seeded by migration, read-only to `authenticated`, no browser writes. Custom/unknown brokers are handled by a seeded `OTHER` row plus a free-text label on the user's own broker account row — no arbitrary JSON, no credentials, ever.
+**brokers = shared reference data.** Canonical brokers (Zerodha, Motilal Oswal, Angel One etc.) are the same entity for every user; per-user copies would fragment identity and block later mapping of imports to a canonical broker. Table is read-only to `authenticated`, no browser writes. **Migration 03 seeds only `OTHER`.** The approved specifications do not confidently name the brokers required by the initial holdings/import sources, so no arbitrary starter subset is presented as a broker master; confirmed canonical brokers are added later through additive migrations. `code` is the stable identity. Unknown/unlisted brokers encountered during import map to `OTHER`, with the original broker/source text preserved in import-source/raw lineage (owned by the later import migrations). No credentials or integration configuration, ever.
 
 **broker_accounts do NOT carry `portfolio_id`.** One portfolio may aggregate several accounts, and one account may later feed several logical portfolios. A direct FK would encode a false 1:1. The mapping arrives later as a join table (or is derived from transactions), when the import design fixes its semantics.
 
@@ -23,7 +23,8 @@ File: `db/migrations/0003_portfolio_foundation.sql`
 
 `broker_accounts`
 - Phase 1 required: `id`, `owner_id`, `broker_id`, `nickname`, `created_at`, `updated_at`
-- Useful, included: `account_ref_masked` (nullable, short display-only fragment such as last 4 chars), `custom_broker_name` (only meaningful when broker is `OTHER`), `archived_at`
+- Useful, included: `account_ref_masked` (nullable, short display-only fragment such as last 4 chars), `archived_at`
+- Removed from the earlier draft: `custom_broker_name`. Its "only when broker is OTHER" rule could not be enforced without a trigger or privileged function, which is not justified for a Phase 1 convenience field. An unlisted broker uses the canonical `OTHER` row; the original source text is preserved in import raw lineage; a proper custom-broker model is added later only if a real requirement emerges.
 - Premature/forbidden: full client ID, PAN, credentials of any kind, API keys, tokens, TOTP secrets, PINs, private keys, integration config
 
 Full broker client identifiers are **not** stored in Phase 1. Nothing in Phase 1 needs them; storing them adds a real privacy liability with no benefit. If integration later needs the full identifier, it is added deliberately with its own review; the masked fragment is user-typed and display-only.
@@ -45,10 +46,7 @@ create table public.brokers (
 );
 
 insert into public.brokers (code, name) values
-  ('ZERODHA','Zerodha'), ('MOTILAL_OSWAL','Motilal Oswal'),
-  ('ANGEL_ONE','Angel One'), ('ICICI_DIRECT','ICICI Direct'),
-  ('HDFC_SECURITIES','HDFC Securities'), ('KOTAK_SECURITIES','Kotak Securities'),
-  ('UPSTOX','Upstox'), ('GROWW','Groww'), ('OTHER','Other / not listed');
+  ('OTHER','Other / not listed');
 
 -- 2. portfolios: user-owned.
 create table public.portfolios (
@@ -73,7 +71,6 @@ create table public.broker_accounts (
   owner_id           uuid not null references public.profiles(id) on delete restrict,
   broker_id          uuid not null references public.brokers(id) on delete restrict,
   nickname           text not null check (char_length(nickname) between 1 and 80),
-  custom_broker_name text check (custom_broker_name is null or char_length(custom_broker_name) between 1 and 120),
   account_ref_masked text check (account_ref_masked is null or char_length(account_ref_masked) between 1 and 24),
   archived_at        timestamptz,
   created_at         timestamptz not null default now(),
