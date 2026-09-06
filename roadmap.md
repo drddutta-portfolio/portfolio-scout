@@ -14,5 +14,12 @@
       3 RESTRICT FKs, RLS + 7 policies, explicit grants, no anon access, no DELETE,
       base_currency insert-only, no custom_broker_name, default_portfolio_id still deferred
 
+- [x] Migration 04 (db/migrations/0004_security_identity.sql) — applied and verified 2026-09-06 13:39 UTC (19:09 IST):
+      enum security_alias_type, normalize_alias() (IMMUTABLE/STRICT/SECURITY INVOKER/search_path=""),
+      securities + security_aliases (shared canonical reference data, no rows seeded),
+      SELECT-only for authenticated, no anon access, no PUBLIC/anon/authenticated EXECUTE on
+      normalize_alias, RESTRICT FK, RLS + 2 SELECT policies, punctuation-preserving normalization,
+      no is_confirmed / resolution-workflow fields
+
 ## Next (awaiting approval)
-- [ ] Migration 04 — not started (do not begin until Migration 03 is reported and approved)
+- [ ] Migration 05 (transactions) — not started (do not begin until Migration 04 is reported and approved)

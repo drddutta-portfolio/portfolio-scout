@@ -21,6 +21,7 @@ Rules (from the Database Architecture and Development Rules documents):
 
 | `db/migrations/0002a_identity_privileges.sql` | 2026-09-06 07:28 UTC (12:58 IST) | No new objects — privilege correction only | `REVOKE ALL` on `profiles`/`user_settings` from `anon`, `authenticated`, then exact re-grant of the approved table/column privileges; `ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL` on tables/sequences and `REVOKE EXECUTE` on functions from `anon`, `authenticated`, `service_role` and `PUBLIC`; direct `EXECUTE` on `set_updated_at()` revoked from `PUBLIC`, `anon`, `authenticated` | Yes — see Migration 02a verification below | Rollback SQL in the file header (restores Supabase's permissive defaults; not recommended) |
 | `db/migrations/0003_portfolio_foundation.sql` | 2026-09-06 10:12 UTC (15:42 IST) | `public.brokers` (shared reference data, seeded with exactly one row: `code = 'OTHER'`, `name = 'Other / not listed'`), `public.portfolios`, `public.broker_accounts`; 3 indexes; 3 triggers reusing the existing `public.set_updated_at()` (not redeclared) | Explicit-grant model. `anon`: nothing. `authenticated`: `SELECT` on all three; INSERT on `portfolios(owner_id, name, description, base_currency, core_target_count)` and `broker_accounts(owner_id, broker_id, nickname, account_ref_masked)`; UPDATE on `portfolios(name, description, core_target_count, archived_at)` and `broker_accounts(nickname, account_ref_masked, archived_at)`; no INSERT/UPDATE/DELETE on `brokers`; no DELETE anywhere; `created_at`/`updated_at`/`owner_id`/`base_currency`/`broker_id` not updatable. RLS enabled on all three; 7 policies | Yes — see Migration 03 verification below | `begin; drop table if exists public.broker_accounts; drop table if exists public.portfolios; drop table if exists public.brokers; commit;` (never `cascade`; never drop the shared `set_updated_at()`) |
+| `db/migrations/0004_security_identity.sql` | 2026-09-06 13:39 UTC (19:09 IST) | Enum `public.security_alias_type` (7 values); function `public.normalize_alias(text)` (IMMUTABLE, STRICT, SECURITY INVOKER, `search_path=""`); tables `public.securities` and `public.security_aliases` (no rows seeded); 7 indexes; 2 triggers reusing `public.set_updated_at()` (not redeclared) | Shared canonical reference data. `anon`: nothing. `authenticated`: `SELECT` only on both tables, no INSERT/UPDATE/DELETE, no EXECUTE on `normalize_alias`. `PUBLIC` EXECUTE on `normalize_alias` explicitly revoked (verified necessary — new public functions are otherwise PUBLIC-executable). `service_role`: PostgreSQL `ALL` on both tables + EXECUTE on `normalize_alias` (needed for the generated column); no service-role credential exists in the app. RLS enabled on both; exactly 2 SELECT policies | Yes — see Migration 04 verification below | `begin; drop table if exists public.security_aliases; drop table if exists public.securities; drop function if exists public.normalize_alias(text); drop type if exists public.security_alias_type; commit;` (never `cascade`; never drop the shared `set_updated_at()`) |
 
 ## Live schema state
 
@@ -30,6 +31,32 @@ Rules (from the Database Architecture and Development Rules documents):
 | 2026-09-05 | Dedicated Supabase project connected (public URL + publishable key in secret store). User independently verified `public` schema empty. Migration 01 applied and verified remotely: exactly the 12 approved enum types exist, no tables/functions/policies/grants. |
 | 2026-09-06 | Migration 02 applied. `public` contains exactly `profiles` and `user_settings`; the 12 enum types are unchanged. Verification results below. |
 | 2026-09-06 | Migration 03 applied. `public` contains exactly `brokers`, `broker_accounts`, `portfolios`, `profiles`, `user_settings`; the 12 enum types are unchanged. Verification results below. |
+| 2026-09-06 | Migration 04 applied. `public` contains exactly `broker_accounts`, `brokers`, `portfolios`, `profiles`, `securities`, `security_aliases`, `user_settings`; enums = the 12 originals plus `security_alias_type`. Verification results below. |
+
+## Migration 04 verification results (2026-09-06)
+
+Capability evidence gathered before deployment (read-only / rolled back): PostgreSQL 17.6, UTF8 encoding, ICU `en_US.UTF-8`; `normalize(text,text)`, `upper`, `btrim` and all `regexp_replace` variants are `provolatile = 'i'`; a STORED generated column over an IMMUTABLE wrapper function was accepted in a probe; `pg_catalog.normalize(x, NFKC)` is a syntax error, so the unqualified keyword form is used; a newly created `public` function is still PUBLIC-executable despite the 02a default hardening, which is why the migration revokes EXECUTE explicitly.
+
+Structure:
+- `public` tables = exactly `broker_accounts`, `brokers`, `portfolios`, `profiles`, `securities`, `security_aliases`, `user_settings`.
+- Enums: the 12 Migration 01 types unchanged, plus exactly one new type `security_alias_type = EXCHANGE_SYMBOL, BROKER_SYMBOL, LEGACY_SYMBOL, ISIN, COMPANY_NAME, IMPORT_TEXT, OTHER` in that order.
+- `securities` and `security_aliases` are both empty — nothing seeded.
+- `profiles`, `user_settings`, `brokers`, `portfolios`, `broker_accounts` ACLs unchanged (`authenticated=r`, no `anon`).
+- `security_aliases` columns: `id, security_id, alias_type, alias_value, alias_normalized (generated: normalize_alias(alias_value)), source, exchange, created_at, updated_at` — no `is_confirmed`, no confidence score, no resolution status/method, no `confirmed_by`/`confirmed_at`, no fuzzy-matching fields.
+- FK `security_aliases_security_id_fkey` has `confdeltype = 'r'` (RESTRICT); no CASCADE or SET NULL anywhere.
+- 7 indexes present; 2 triggers reusing `set_updated_at()`, which is unchanged (`provolatile='v'`, `prosecdef=false`, `search_path=""`).
+- `pg_default_acl` for `postgres` in `public` still owner-only (`r={postgres=arwdDxtm}`, `S={postgres=rwU}`, `f={postgres=X}`).
+
+Security identity (owner-level, rolled back): duplicate ISIN rejected; two NULL ISINs accepted; duplicate `(exchange, primary_symbol)` rejected; the same symbol on a second exchange accepted; `primary_symbol` without `exchange` rejected; malformed ISIN rejected; malformed currency rejected; `currency` defaults to `INR`. Lifecycle is `is_active` / `delisted_on` / `archived_at`; no DELETE is available to the browser.
+
+Alias model (rolled back): `EXCHANGE_SYMBOL` without `exchange` rejected, with `exchange` accepted; `BROKER_SYMBOL` without `source` rejected, with `source` accepted; `ISIN` alias `'INE101A0102'` rejected and `'ine101a01026'` accepted (normalized to `INE101A01026`); `COMPANY_NAME`, `IMPORT_TEXT`, `LEGACY_SYMBOL`, `OTHER` accepted with no context. Duplicate `(alias_type, source, exchange, alias_normalized)` rejected; the same alias under a different `source` accepted, and a context-free lookup then returns 2 rows — visible as ambiguous, never merged. Deleting a referenced security is blocked by the RESTRICT FK.
+
+Normalization: `normalize_alias` is `provolatile='i'`, `proisstrict=true`, `prosecdef=false`, `proconfig={search_path=""}`. Results: `'  m&m  '→'M&M'`, `'M_M'→'M_M'`, `'MM'→'MM'` (3 distinct values — punctuation preserved), `'reliance   industries'→'RELIANCE INDUSTRIES'`, zero-width character stripped, `'Alpha   Ltd'→'ALPHA LTD'`, `'alpha ltd.'→'ALPHA LTD.'`.
+
+Privileges / RLS (signed-in and anonymous, rolled back): `authenticated` SELECT succeeds on both tables; INSERT, UPDATE and DELETE denied on both; `authenticated` and `anon` both denied EXECUTE on `normalize_alias`; `anon` denied SELECT on both tables. `proacl` on `normalize_alias` = `{postgres=X, service_role=X}` — no `PUBLIC`, `anon` or `authenticated` entry. RLS enabled on both tables with exactly two SELECT policies for `authenticated`. `relacl` on both tables = `{postgres, authenticated=r, service_role}`. `updated_at` advances on a privileged UPDATE on both tables via the reused trigger.
+
+No service-role credential or key was introduced or used by the application. Repository secret scan, type check and production build all clean.
+
 
 ## Migration 03 verification results (2026-09-06)
 
