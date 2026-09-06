@@ -72,7 +72,9 @@ A wrong economic fact is corrected only by a new reversal/superseding ledger row
 - B. `INCOMPLETE` / `NEEDS_REVIEW` ⇒ at least one issue.
 - C. NULL `trade_date` ⇒ not `VALID`.
 - D. NULL `quantity` ⇒ not `VALID`.
-- E. NULL `broker_account_id` ⇒ not `VALID` (NULL preserved, deficiency disclosed via `MISSING_BROKER` / `MISSING_ACCOUNT`).
+- E. NULL `broker_account_id` ⇒ not `VALID`, **and** `data_quality_issues` must include `MISSING_ACCOUNT`.
+
+`MISSING_BROKER` and `MISSING_ACCOUNT` are kept precise and are not interchangeable. `broker_account_id` references the user's specific broker account, so a NULL here means the account relationship is missing and must be disclosed with `MISSING_ACCOUNT`. `MISSING_BROKER` is reserved for import/staging rows where the source broker or institution itself is unknown. The account is never fabricated, and `broker_account_id` is not made NOT NULL because historical incomplete transactions must remain preservable.
 
 No issue-to-column mapping is encoded; the trusted validator does detailed validation. **Array deduplication is deferred**: enforcing set semantics on `data_quality_issue[]` in SQL requires either a normalising trigger or an expensive check, and duplicates are harmless to interpretation. The trusted commit validator will normalise the array; documented as a deliberate deferral.
 
