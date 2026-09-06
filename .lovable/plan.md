@@ -19,6 +19,7 @@ File: `db/migrations/0003_portfolio_foundation.sql`
 `portfolios`
 - Phase 1 required: `id`, `owner_id`, `name`, `base_currency`, `created_at`, `updated_at`
 - Useful, included: `description` (nullable), `archived_at` (nullable timestamptz — archive instead of delete, preserves history), `core_target_count` (nullable int, a COUNT of stocks, never a percentage)
+- `base_currency` is settable on INSERT only: it is excluded from the authenticated UPDATE grant. Once financial records exist, changing base currency is not an ordinary edit; any future conversion uses an explicitly reviewed workflow, not a browser UPDATE.
 - Premature, excluded: accounting method, concentration/limit controls, benchmark, risk profile, rebalancing rules, target allocations
 
 `broker_accounts`
@@ -96,14 +97,14 @@ grant all    on public.brokers to service_role;
 grant select on public.portfolios to authenticated;
 grant insert (owner_id, name, description, base_currency, core_target_count)
   on public.portfolios to authenticated;
-grant update (name, description, base_currency, core_target_count, archived_at)
+grant update (name, description, core_target_count, archived_at)
   on public.portfolios to authenticated;
 grant all on public.portfolios to service_role;
 
 grant select on public.broker_accounts to authenticated;
-grant insert (owner_id, broker_id, nickname, custom_broker_name, account_ref_masked)
+grant insert (owner_id, broker_id, nickname, account_ref_masked)
   on public.broker_accounts to authenticated;
-grant update (nickname, custom_broker_name, account_ref_masked, archived_at)
+grant update (nickname, account_ref_masked, archived_at)
   on public.broker_accounts to authenticated;
 grant all on public.broker_accounts to service_role;
 
@@ -132,7 +133,7 @@ create policy broker_accounts_update_own on public.broker_accounts
 commit;
 ```
 
-`anon`: no grants, no policies, no access. No DELETE grant and no DELETE policy anywhere — removal is archival (`archived_at`). `created_at`/`updated_at` are excluded from every column grant, so they stay database-controlled; `owner_id` is insertable (must equal `auth.uid()` per policy) but not updatable, so rows cannot be reassigned.
+`anon`: no grants, no policies, no access. No DELETE grant and no DELETE policy anywhere — removal is archival (`archived_at`). `created_at`/`updated_at` are excluded from every column grant, so they stay database-controlled; `owner_id` is insertable (must equal `auth.uid()` per policy) but not updatable, so rows cannot be reassigned; `base_currency` is insertable but not updatable, so it is fixed at portfolio creation.
 
 ## Deletion behaviour
 
@@ -159,15 +160,18 @@ Safe only while no later migration references these tables. Never `cascade`. `se
 
 - Portfolio↔broker-account mapping stays open; the join table will be added when import semantics are fixed. Adding it later is additive.
 - `unique (owner_id, id)` on `portfolios` is redundant today; it exists solely so the ownership-safe composite FK for `default_portfolio_id` needs no table rewrite.
-- Broker seed rows are identified by stable `code`; later seeds must upsert on `code`, never re-insert.
+- Only `OTHER` is seeded. Confirmed canonical brokers arrive as additive migrations inserting by stable `code`; those migrations must upsert on `code`, never re-insert.
 - If the full broker client identifier is ever needed, it is a separate reviewed migration with its own privacy decision — not a widening of `account_ref_masked`.
+- If a real custom-broker requirement emerges, it gets its own reviewed model (table or explicit design) — `custom_broker_name` is not resurrected without an enforceable OTHER relationship.
+- If base-currency change is ever required, it arrives as an explicitly reviewed workflow (e.g. conversion or new-portfolio migration), not by re-granting UPDATE on the column.
 
 ## Post-deployment verification (run after approval)
 
 1. Exactly three new tables in `public`; Migration 01's 12 enums and Migration 02's two tables unchanged.
-2. `relacl` on each new table shows no `anon` entry and only the approved `authenticated` privileges; `information_schema.column_privileges` shows no INSERT/UPDATE on `created_at`/`updated_at`.
-3. All three FKs report `confdeltype = 'r'`.
-4. RLS enabled on all three; exactly seven policies with the approved names.
-5. Behavioural, as two real signed-in users: own portfolio/account insert succeeds; cross-user select/update returns nothing; forged `created_at` insert is rejected; DELETE rejected; broker insert/update/delete rejected; broker select succeeds; profile deletion blocked by the portfolio FK.
-6. Update of a row advances `updated_at` via the existing trigger.
-7. Secret scan, type check and build clean; no service-role credential used by the application.
+2. `brokers` contains exactly one row: code `OTHER`. `broker_accounts` has no `custom_broker_name` column.
+3. `relacl` on each new table shows no `anon` entry and only the approved `authenticated` privileges; `information_schema.column_privileges` shows: no INSERT/UPDATE on `created_at`/`updated_at`; no UPDATE on `portfolios.base_currency`, `portfolios.owner_id` or `broker_accounts.owner_id`/`broker_id`.
+4. All three FKs report `confdeltype = 'r'`.
+5. RLS enabled on all three; exactly seven policies with the approved names.
+6. Behavioural, as two real signed-in users: own portfolio/account insert succeeds (including `base_currency` on insert); cross-user select/update returns nothing; forged `created_at` insert is rejected; UPDATE of `base_currency` is rejected; DELETE rejected; broker insert/update/delete rejected; broker select succeeds; profile deletion blocked by the portfolio FK.
+7. Update of a row advances `updated_at` via the existing trigger.
+8. Secret scan, type check and build clean; no service-role credential used by the application.
