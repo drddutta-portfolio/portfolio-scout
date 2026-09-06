@@ -20,6 +20,7 @@ Rules (from the Database Architecture and Development Rules documents):
 | `db/migrations/0002_identity.sql` | 2026-09-06 07:02 UTC (12:32 IST) | `public.profiles`, `public.user_settings`, `public.set_updated_at()`, triggers `profiles_set_updated_at` / `user_settings_set_updated_at` | RLS enabled on both tables; exactly 6 owner-scoped policies (`SELECT`/`INSERT`/`UPDATE` per table, `TO authenticated`, `= auth.uid()`); no DELETE policy. Column-level grants applied as approved, **but see the open privilege issue below** | Partial — structure, FKs (`ON DELETE RESTRICT` both), RLS, policies and trigger function all verified correct. Privilege verification FAILED: Supabase's pre-existing `ALTER DEFAULT PRIVILEGES` grants `arwdDxtm` on every new `public` table to `anon`, `authenticated` and `service_role`, so the approved narrow column grants were additive and did not restrict anything | `begin; drop table if exists public.user_settings; drop table if exists public.profiles; drop function if exists public.set_updated_at(); commit;` (never `cascade`) |
 
 | `db/migrations/0002a_identity_privileges.sql` | 2026-09-06 07:28 UTC (12:58 IST) | No new objects — privilege correction only | `REVOKE ALL` on `profiles`/`user_settings` from `anon`, `authenticated`, then exact re-grant of the approved table/column privileges; `ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL` on tables/sequences and `REVOKE EXECUTE` on functions from `anon`, `authenticated`, `service_role` and `PUBLIC`; direct `EXECUTE` on `set_updated_at()` revoked from `PUBLIC`, `anon`, `authenticated` | Yes — see Migration 02a verification below | Rollback SQL in the file header (restores Supabase's permissive defaults; not recommended) |
+| `db/migrations/0003_portfolio_foundation.sql` | 2026-09-06 10:12 UTC (15:42 IST) | `public.brokers` (shared reference data, seeded with exactly one row: `code = 'OTHER'`, `name = 'Other / not listed'`), `public.portfolios`, `public.broker_accounts`; 3 indexes; 3 triggers reusing the existing `public.set_updated_at()` (not redeclared) | Explicit-grant model. `anon`: nothing. `authenticated`: `SELECT` on all three; INSERT on `portfolios(owner_id, name, description, base_currency, core_target_count)` and `broker_accounts(owner_id, broker_id, nickname, account_ref_masked)`; UPDATE on `portfolios(name, description, core_target_count, archived_at)` and `broker_accounts(nickname, account_ref_masked, archived_at)`; no INSERT/UPDATE/DELETE on `brokers`; no DELETE anywhere; `created_at`/`updated_at`/`owner_id`/`base_currency`/`broker_id` not updatable. RLS enabled on all three; 7 policies | Yes — see Migration 03 verification below | `begin; drop table if exists public.broker_accounts; drop table if exists public.portfolios; drop table if exists public.brokers; commit;` (never `cascade`; never drop the shared `set_updated_at()`) |
 
 ## Live schema state
 
@@ -28,6 +29,36 @@ Rules (from the Database Architecture and Development Rules documents):
 | 2026-09-05 | Dedicated Supabase project not yet connected to this Lovable project — no credentials present in the environment, so the live schema could not be inspected. Nothing is assumed to exist. |
 | 2026-09-05 | Dedicated Supabase project connected (public URL + publishable key in secret store). User independently verified `public` schema empty. Migration 01 applied and verified remotely: exactly the 12 approved enum types exist, no tables/functions/policies/grants. |
 | 2026-09-06 | Migration 02 applied. `public` contains exactly `profiles` and `user_settings`; the 12 enum types are unchanged. Verification results below. |
+| 2026-09-06 | Migration 03 applied. `public` contains exactly `brokers`, `broker_accounts`, `portfolios`, `profiles`, `user_settings`; the 12 enum types are unchanged. Verification results below. |
+
+## Migration 03 verification results (2026-09-06)
+
+Structure and objects:
+- `public` tables = exactly `broker_accounts`, `brokers`, `portfolios`, `profiles`, `user_settings`; 12 Migration 01 enum types unchanged; `profiles`/`user_settings` ACLs unchanged (`authenticated=r` only, no `anon`).
+- `brokers` contains exactly one row: `OTHER / Other / not listed`.
+- `broker_accounts` columns: `account_ref_masked, archived_at, broker_id, created_at, id, nickname, owner_id, updated_at` — no `custom_broker_name`, no client identifier, no credential column.
+- `portfolios` columns: `archived_at, base_currency, core_target_count, created_at, description, id, name, owner_id, updated_at` — no accounting method, concentration control, benchmark or target allocation.
+- `core_target_count` comment present: "Target NUMBER OF CORE STOCKS (e.g. ~35). Never an allocation percentage."
+- All three FKs (`portfolios_owner_id_fkey`, `broker_accounts_owner_id_fkey`, `broker_accounts_broker_id_fkey`) report `confdeltype = 'r'` (ON DELETE RESTRICT).
+- RLS enabled on all three; exactly the 7 approved policies, all `{authenticated}`.
+- `pg_default_acl` for role `postgres` in `public` still owner-only (`r={postgres=arwdDxtm}`, `S={postgres=rwU}`, `f={postgres=X}`) — Migration 02a hardening intact.
+- `set_updated_at()` still `prosecdef = false` with `search_path=""`; reused, not redeclared.
+
+Privileges: `relacl` on each new table = `{postgres, service_role, authenticated=r}` — `anon` absent entirely. `authenticated` table-level privilege is `SELECT` only; column privileges exactly as granted, with no INSERT/UPDATE on `created_at`/`updated_at`, no UPDATE on `portfolios.base_currency`, `owner_id` (either table) or `broker_accounts.broker_id`.
+
+Behavioural (two signed-in test users, all inside rolled-back transactions):
+- Own portfolio INSERT (with `base_currency`, `core_target_count`) and own broker-account INSERT succeed.
+- Broker SELECT succeeds; broker INSERT / UPDATE / DELETE → permission denied.
+- Forged `created_at` INSERT → permission denied; `updated_at` write → permission denied.
+- `base_currency` UPDATE → permission denied; `owner_id` reassign → permission denied; `broker_id` change → permission denied.
+- DELETE on `portfolios` and `broker_accounts` → permission denied.
+- Legitimate `name` UPDATE succeeds; second user sees 0 rows and its UPDATE affects 0 rows.
+- Deleting a profile with dependent rows → blocked by `portfolios_owner_id_fkey` RESTRICT.
+- `anon` SELECT on `brokers`, `portfolios`, `broker_accounts` → permission denied.
+- Triggers verified: after an UPDATE, `updated_at > created_at` on all three tables (same-transaction `now()` semantics noted under Migration 02 still apply).
+
+No service-role credential or key was introduced or used by the application; repository secret scan and type check clean.
+
 
 ## Migration 02 verification results (2026-09-06)
 
