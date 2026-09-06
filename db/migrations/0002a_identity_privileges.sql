@@ -85,3 +85,18 @@ revoke execute on function public.set_updated_at() from public;
 revoke execute on function public.set_updated_at() from anon, authenticated;
 
 commit;
+
+-- 4. Residual future-object defaults ---------------------------------------
+--    The DML revokes above leave non-DML defaults (TRUNCATE/REFERENCES/TRIGGER/
+--    MAINTAIN on tables, UPDATE on sequences). Under the explicit-grant model
+--    nothing should be automatic, so remove those too.
+
+begin;
+
+alter default privileges for role postgres in schema public
+  revoke all on tables from anon, authenticated, service_role;
+
+alter default privileges for role postgres in schema public
+  revoke all on sequences from anon, authenticated, service_role;
+
+commit;
