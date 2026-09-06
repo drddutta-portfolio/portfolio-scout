@@ -29,6 +29,36 @@ Rules (from the Database Architecture and Development Rules documents):
 | 2026-09-05 | Dedicated Supabase project not yet connected to this Lovable project — no credentials present in the environment, so the live schema could not be inspected. Nothing is assumed to exist. |
 | 2026-09-05 | Dedicated Supabase project connected (public URL + publishable key in secret store). User independently verified `public` schema empty. Migration 01 applied and verified remotely: exactly the 12 approved enum types exist, no tables/functions/policies/grants. |
 | 2026-09-06 | Migration 02 applied. `public` contains exactly `profiles` and `user_settings`; the 12 enum types are unchanged. Verification results below. |
+| 2026-09-06 | Migration 03 applied. `public` contains exactly `brokers`, `broker_accounts`, `portfolios`, `profiles`, `user_settings`; the 12 enum types are unchanged. Verification results below. |
+
+## Migration 03 verification results (2026-09-06)
+
+Structure and objects:
+- `public` tables = exactly `broker_accounts`, `brokers`, `portfolios`, `profiles`, `user_settings`; 12 Migration 01 enum types unchanged; `profiles`/`user_settings` ACLs unchanged (`authenticated=r` only, no `anon`).
+- `brokers` contains exactly one row: `OTHER / Other / not listed`.
+- `broker_accounts` columns: `account_ref_masked, archived_at, broker_id, created_at, id, nickname, owner_id, updated_at` — no `custom_broker_name`, no client identifier, no credential column.
+- `portfolios` columns: `archived_at, base_currency, core_target_count, created_at, description, id, name, owner_id, updated_at` — no accounting method, concentration control, benchmark or target allocation.
+- `core_target_count` comment present: "Target NUMBER OF CORE STOCKS (e.g. ~35). Never an allocation percentage."
+- All three FKs (`portfolios_owner_id_fkey`, `broker_accounts_owner_id_fkey`, `broker_accounts_broker_id_fkey`) report `confdeltype = 'r'` (ON DELETE RESTRICT).
+- RLS enabled on all three; exactly the 7 approved policies, all `{authenticated}`.
+- `pg_default_acl` for role `postgres` in `public` still owner-only (`r={postgres=arwdDxtm}`, `S={postgres=rwU}`, `f={postgres=X}`) — Migration 02a hardening intact.
+- `set_updated_at()` still `prosecdef = false` with `search_path=""`; reused, not redeclared.
+
+Privileges: `relacl` on each new table = `{postgres, service_role, authenticated=r}` — `anon` absent entirely. `authenticated` table-level privilege is `SELECT` only; column privileges exactly as granted, with no INSERT/UPDATE on `created_at`/`updated_at`, no UPDATE on `portfolios.base_currency`, `owner_id` (either table) or `broker_accounts.broker_id`.
+
+Behavioural (two signed-in test users, all inside rolled-back transactions):
+- Own portfolio INSERT (with `base_currency`, `core_target_count`) and own broker-account INSERT succeed.
+- Broker SELECT succeeds; broker INSERT / UPDATE / DELETE → permission denied.
+- Forged `created_at` INSERT → permission denied; `updated_at` write → permission denied.
+- `base_currency` UPDATE → permission denied; `owner_id` reassign → permission denied; `broker_id` change → permission denied.
+- DELETE on `portfolios` and `broker_accounts` → permission denied.
+- Legitimate `name` UPDATE succeeds; second user sees 0 rows and its UPDATE affects 0 rows.
+- Deleting a profile with dependent rows → blocked by `portfolios_owner_id_fkey` RESTRICT.
+- `anon` SELECT on `brokers`, `portfolios`, `broker_accounts` → permission denied.
+- Triggers verified: after an UPDATE, `updated_at > created_at` on all three tables (same-transaction `now()` semantics noted under Migration 02 still apply).
+
+No service-role credential or key was introduced or used by the application; repository secret scan and type check clean.
+
 
 ## Migration 02 verification results (2026-09-06)
 
