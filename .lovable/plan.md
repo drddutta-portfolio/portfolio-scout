@@ -1,183 +1,176 @@
-# Migration 02 — Identity foundation (REVISED proposal, NOT applied)
+# Migration 03 — portfolios, brokers, broker_accounts (proposal only)
 
-**Filename:** `db/migrations/0002_identity.sql`
+Status: NOT applied. No remote schema change made. No secrets introduced. Migration 01 / 02 / 02a objects untouched.
 
-Amendments folded in: non-destructive Auth FK, database-controlled audit timestamps via column-level grants, `display_decimals` removed. Everything else from the approved design is retained.
+File: `db/migrations/0003_portfolio_foundation.sql`
 
-## Scope decision (unchanged)
+## Decisions
 
-| Table | Verdict | Reason |
-|---|---|---|
-| `profiles` | Create now | Stable owner anchor for every later user-owned table; identity only, no credentials. |
-| `user_settings` | Create now, typed columns only | Genuine per-user display preferences. No JSON blob. |
-| `app_config` | Deferred | Core target count, concentration limits, accounting-method selection and default active portfolio are portfolio-scoped and belong as typed, auditable columns on `portfolios` (Migration 03). No untyped dumping ground. |
+**brokers = shared reference data.** Zerodha, Motilal Oswal, Angel One etc. are the same entity for every user; per-user copies would fragment identity and block later mapping of imports to a canonical broker. Table is seeded by migration, read-only to `authenticated`, no browser writes. Custom/unknown brokers are handled by a seeded `OTHER` row plus a free-text label on the user's own broker account row — no arbitrary JSON, no credentials, ever.
 
-`default_portfolio_id` is added to `user_settings` in Migration 03, alongside the table it points at.
+**broker_accounts do NOT carry `portfolio_id`.** One portfolio may aggregate several accounts, and one account may later feed several logical portfolios. A direct FK would encode a false 1:1. The mapping arrives later as a join table (or is derived from transactions), when the import design fixes its semantics.
 
-## Table 1 — `public.profiles`
+**`user_settings.default_portfolio_id`: DEFERRED.** A plain FK cannot assert that the portfolio belongs to the same user. The clean enforcement is a composite FK `(user_id, default_portfolio_id) -> portfolios(owner_id, id)`, which requires an extra unique key on `portfolios(owner_id, id)` and still leaves the column meaningless in Phase 1, where the UI uses a single portfolio. Deferring costs nothing and avoids a SECURITY DEFINER helper. Phase 1 picks the user's single portfolio by `created_at asc limit 1`. Migration 03 adds `unique (owner_id, id)` on `portfolios` now so the composite FK is available later without a rewrite.
 
-| Column | Type | Null | Default | Notes |
-|---|---|---|---|---|
-| `id` | `uuid` | NOT NULL | — | PK; `references auth.users(id) on delete restrict` |
-| `display_name` | `text` | NULL | — | check: 1–120 chars when present |
-| `created_at` | `timestamptz` | NOT NULL | `now()` | database-controlled, never granted to clients |
-| `updated_at` | `timestamptz` | NOT NULL | `now()` | trigger-controlled, never granted to clients |
+**No accounting-method column.** Any default would silently pick a method. Cost basis / P&L stay unavailable until a method is formally approved; the column arrives with that approval, typed as an enum whose first value is an explicit unconfigured state.
 
-PK = FK = `auth.users.id`. No extra index (PK covers `id = auth.uid()`). Profile creation is manual and idempotent from the app (`insert ... on conflict (id) do nothing`) — no trigger on `auth.users`, no `SECURITY DEFINER`. No DELETE policy or grant.
+## Field classification
 
-## Table 2 — `public.user_settings`
+`portfolios`
+- Phase 1 required: `id`, `owner_id`, `name`, `base_currency`, `created_at`, `updated_at`
+- Useful, included: `description` (nullable), `archived_at` (nullable timestamptz — archive instead of delete, preserves history), `core_target_count` (nullable int, a COUNT of stocks, never a percentage)
+- Premature, excluded: accounting method, concentration/limit controls, benchmark, risk profile, rebalancing rules, target allocations
 
-| Column | Type | Null | Default | Notes |
-|---|---|---|---|---|
-| `user_id` | `uuid` | NOT NULL | — | PK; `references public.profiles(id) on delete restrict` |
-| `locale` | `text` | NOT NULL | `'en-IN'` | check `~ '^[a-z]{2}(-[A-Z]{2})?$'` |
-| `timezone` | `text` | NOT NULL | `'Asia/Kolkata'` | check 1–64 chars |
-| `date_format` | `text` | NOT NULL | `'DD-MM-YYYY'` | check in fixed allow-list |
-| `number_locale` | `text` | NOT NULL | `'en-IN'` | display grouping only |
-| `created_at` | `timestamptz` | NOT NULL | `now()` | database-controlled |
-| `updated_at` | `timestamptz` | NOT NULL | `now()` | trigger-controlled |
+`broker_accounts`
+- Phase 1 required: `id`, `owner_id`, `broker_id`, `nickname`, `created_at`, `updated_at`
+- Useful, included: `account_ref_masked` (nullable, short display-only fragment such as last 4 chars), `custom_broker_name` (only meaningful when broker is `OTHER`), `archived_at`
+- Premature/forbidden: full client ID, PAN, credentials of any kind, API keys, tokens, TOTP secrets, PINs, private keys, integration config
 
-`display_decimals` removed — metric-specific display precision (currency, price, quantity, percentage, ratio) is a UI-layer concern to be designed later. Canonical precision remains `numeric(38,18)` where applicable.
+Full broker client identifiers are **not** stored in Phase 1. Nothing in Phase 1 needs them; storing them adds a real privacy liability with no benefit. If integration later needs the full identifier, it is added deliberately with its own review; the masked fragment is user-typed and display-only.
 
-## Auth-user deletion behaviour
-
-`on delete restrict` on `profiles.id` means Postgres **refuses** to delete a row in `auth.users` while a PortfolioAI profile exists for it. Deleting an authentication identity can therefore never cascade away investment, accounting or decision history — the delete simply errors. Consequences accepted deliberately:
-
-- Supabase Auth admin "delete user" will fail with a foreign-key violation for any user who has a profile. That is the intended guard, not a bug.
-- Real account/data removal must be an explicit, controlled, separately approved workflow that archives or removes PortfolioAI data first and only then removes the auth identity.
-- `user_settings.user_id` also uses `restrict` so nothing disappears incidentally.
-- **Principle binding on all future migrations:** ledger, holdings, import-lineage, corporate-action, engine-result and credit-history tables never use `on delete cascade` toward an owner or identity parent. Cascade is permitted only inside a single owned aggregate where the child has no independent audit value (for example import staging rows belonging to their own batch), and each such case must be stated explicitly in that migration.
-
-## Audit-timestamp protection — exact GRANT strategy
-
-Table-wide UPDATE is never granted. Grants are column-scoped, so `created_at` and `updated_at` are not writable by `authenticated` at all — the client cannot supply them on INSERT (PostgREST rejects a payload touching a non-granted column) and cannot change them on UPDATE. Defaults populate them on insert; the `BEFORE UPDATE` trigger sets `updated_at`. Triggers execute independently of the caller's column privileges, so the trigger still works.
+## SQL
 
 ```sql
-grant select on public.profiles to authenticated;
-grant insert (id, display_name) on public.profiles to authenticated;
-grant update (display_name)     on public.profiles to authenticated;
-
-grant select on public.user_settings to authenticated;
-grant insert (user_id, locale, timezone, date_format, number_locale)
-  on public.user_settings to authenticated;
-grant update (locale, timezone, date_format, number_locale)
-  on public.user_settings to authenticated;
-
-grant all on public.profiles      to service_role;
-grant all on public.user_settings to service_role;
-```
-
-No grants of any kind to `anon`. No DELETE granted to anyone but `service_role`. SELECT is table-wide so the UI can read timestamps and so PostgREST `returning` works. The `service_role` GRANT is a Postgres privilege statement only — no service-role key is introduced or used by the application.
-
-## Complete SQL
-
-```sql
--- 0002_identity.sql — profiles, user_settings, shared updated_at trigger.
--- Auth deletion is non-destructive (restrict). Audit timestamps are DB-controlled.
+-- 0003_portfolio_foundation.sql
 begin;
 
-create or replace function public.set_updated_at()
-returns trigger language plpgsql set search_path = '' as $$
-begin new.updated_at = now(); return new; end $$;
-
-create table public.profiles (
-  id uuid primary key references auth.users(id) on delete restrict,
-  display_name text,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  constraint profiles_display_name_len
-    check (display_name is null or char_length(display_name) between 1 and 120)
+-- 1. brokers: shared reference data, no credentials, ever.
+create table public.brokers (
+  id          uuid primary key default gen_random_uuid(),
+  code        text not null unique check (code ~ '^[A-Z0-9_]{2,32}$'),
+  name        text not null check (char_length(name) between 1 and 120),
+  is_active   boolean not null default true,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
 );
 
-create table public.user_settings (
-  user_id uuid primary key references public.profiles(id) on delete restrict,
-  locale text not null default 'en-IN'
-    check (locale ~ '^[a-z]{2}(-[A-Z]{2})?$'),
-  timezone text not null default 'Asia/Kolkata'
-    check (char_length(timezone) between 1 and 64),
-  date_format text not null default 'DD-MM-YYYY'
-    check (date_format in ('DD-MM-YYYY','MM-DD-YYYY','YYYY-MM-DD')),
-  number_locale text not null default 'en-IN'
-    check (number_locale ~ '^[a-z]{2}(-[A-Z]{2})?$'),
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+insert into public.brokers (code, name) values
+  ('ZERODHA','Zerodha'), ('MOTILAL_OSWAL','Motilal Oswal'),
+  ('ANGEL_ONE','Angel One'), ('ICICI_DIRECT','ICICI Direct'),
+  ('HDFC_SECURITIES','HDFC Securities'), ('KOTAK_SECURITIES','Kotak Securities'),
+  ('UPSTOX','Upstox'), ('GROWW','Groww'), ('OTHER','Other / not listed');
+
+-- 2. portfolios: user-owned.
+create table public.portfolios (
+  id                uuid primary key default gen_random_uuid(),
+  owner_id          uuid not null references public.profiles(id) on delete restrict,
+  name              text not null check (char_length(name) between 1 and 120),
+  description       text check (description is null or char_length(description) <= 2000),
+  base_currency     char(3) not null default 'INR' check (base_currency ~ '^[A-Z]{3}$'),
+  core_target_count integer check (core_target_count is null or core_target_count between 1 and 500),
+  archived_at       timestamptz,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now(),
+  unique (owner_id, name),
+  unique (owner_id, id)   -- enables a future ownership-safe composite FK
+);
+comment on column public.portfolios.core_target_count is
+  'Target NUMBER OF CORE STOCKS (e.g. ~35). Never an allocation percentage.';
+
+-- 3. broker_accounts: user-owned. No portfolio_id (many-to-many arrives later).
+create table public.broker_accounts (
+  id                 uuid primary key default gen_random_uuid(),
+  owner_id           uuid not null references public.profiles(id) on delete restrict,
+  broker_id          uuid not null references public.brokers(id) on delete restrict,
+  nickname           text not null check (char_length(nickname) between 1 and 80),
+  custom_broker_name text check (custom_broker_name is null or char_length(custom_broker_name) between 1 and 120),
+  account_ref_masked text check (account_ref_masked is null or char_length(account_ref_masked) between 1 and 24),
+  archived_at        timestamptz,
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now(),
+  unique (owner_id, nickname)
 );
 
-create trigger profiles_set_updated_at before update on public.profiles
+create index portfolios_owner_idx       on public.portfolios (owner_id);
+create index broker_accounts_owner_idx  on public.broker_accounts (owner_id);
+create index broker_accounts_broker_idx on public.broker_accounts (broker_id);
+
+create trigger brokers_set_updated_at before update on public.brokers
   for each row execute function public.set_updated_at();
-create trigger user_settings_set_updated_at before update on public.user_settings
+create trigger portfolios_set_updated_at before update on public.portfolios
+  for each row execute function public.set_updated_at();
+create trigger broker_accounts_set_updated_at before update on public.broker_accounts
   for each row execute function public.set_updated_at();
 
--- Column-scoped privileges: created_at / updated_at are never client-writable.
-grant select on public.profiles to authenticated;
-grant insert (id, display_name) on public.profiles to authenticated;
-grant update (display_name) on public.profiles to authenticated;
+-- 4. Explicit grants only (Migration 02a model: nothing is automatic).
+grant select on public.brokers to authenticated;
+grant all    on public.brokers to service_role;
 
-grant select on public.user_settings to authenticated;
-grant insert (user_id, locale, timezone, date_format, number_locale)
-  on public.user_settings to authenticated;
-grant update (locale, timezone, date_format, number_locale)
-  on public.user_settings to authenticated;
+grant select on public.portfolios to authenticated;
+grant insert (owner_id, name, description, base_currency, core_target_count)
+  on public.portfolios to authenticated;
+grant update (name, description, base_currency, core_target_count, archived_at)
+  on public.portfolios to authenticated;
+grant all on public.portfolios to service_role;
 
-grant all on public.profiles to service_role;
-grant all on public.user_settings to service_role;
+grant select on public.broker_accounts to authenticated;
+grant insert (owner_id, broker_id, nickname, custom_broker_name, account_ref_masked)
+  on public.broker_accounts to authenticated;
+grant update (nickname, custom_broker_name, account_ref_masked, archived_at)
+  on public.broker_accounts to authenticated;
+grant all on public.broker_accounts to service_role;
 
-alter table public.profiles enable row level security;
-alter table public.user_settings enable row level security;
+-- 5. RLS.
+alter table public.brokers          enable row level security;
+alter table public.portfolios       enable row level security;
+alter table public.broker_accounts  enable row level security;
 
-create policy profiles_select_own on public.profiles
-  for select to authenticated using (id = auth.uid());
-create policy profiles_insert_own on public.profiles
-  for insert to authenticated with check (id = auth.uid());
-create policy profiles_update_own on public.profiles
-  for update to authenticated using (id = auth.uid()) with check (id = auth.uid());
+create policy brokers_select_all on public.brokers
+  for select to authenticated using (true);
 
-create policy user_settings_select_own on public.user_settings
-  for select to authenticated using (user_id = auth.uid());
-create policy user_settings_insert_own on public.user_settings
-  for insert to authenticated with check (user_id = auth.uid());
-create policy user_settings_update_own on public.user_settings
-  for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy portfolios_select_own on public.portfolios
+  for select to authenticated using (owner_id = auth.uid());
+create policy portfolios_insert_own on public.portfolios
+  for insert to authenticated with check (owner_id = auth.uid());
+create policy portfolios_update_own on public.portfolios
+  for update to authenticated using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+
+create policy broker_accounts_select_own on public.broker_accounts
+  for select to authenticated using (owner_id = auth.uid());
+create policy broker_accounts_insert_own on public.broker_accounts
+  for insert to authenticated with check (owner_id = auth.uid());
+create policy broker_accounts_update_own on public.broker_accounts
+  for update to authenticated using (owner_id = auth.uid()) with check (owner_id = auth.uid());
 
 commit;
 ```
 
-No DELETE policies exist, so no one but `service_role` can remove rows — and only through a deliberate server-side workflow that does not exist yet.
+`anon`: no grants, no policies, no access. No DELETE grant and no DELETE policy anywhere — removal is archival (`archived_at`). `created_at`/`updated_at` are excluded from every column grant, so they stay database-controlled; `owner_id` is insertable (must equal `auth.uid()` per policy) but not updatable, so rows cannot be reassigned.
+
+## Deletion behaviour
+
+| FK | Action | Justification |
+|---|---|---|
+| `portfolios.owner_id -> profiles.id` | RESTRICT | Portfolio/accounting history must never vanish with an owner deletion. |
+| `broker_accounts.owner_id -> profiles.id` | RESTRICT | Same; accounts anchor future transaction lineage. |
+| `broker_accounts.broker_id -> brokers.id` | RESTRICT | A referenced broker cannot be deleted; deactivate via `is_active` instead. |
+
+No CASCADE and no SET NULL anywhere in this migration.
 
 ## Rollback
 
 ```sql
 begin;
-drop table if exists public.user_settings;
-drop table if exists public.profiles;
-drop function if exists public.set_updated_at();
+drop table if exists public.broker_accounts;
+drop table if exists public.portfolios;
+drop table if exists public.brokers;
 commit;
 ```
-Safe only while no later migration depends on these objects; from Migration 03 onward, revert dependents first. Never `cascade`. Rollback removes profile/settings rows (auth users are untouched).
+Safe only while no later migration references these tables. Never `cascade`. `set_updated_at()` is shared and must not be dropped.
 
-## Risks and future compatibility
+## Future compatibility risks
 
-- `restrict` will surface as a foreign-key error in any tooling that tries to delete an auth user. This is the intended safety behaviour and must be documented for whoever operates the Supabase dashboard.
-- Manual profile creation: a signed-in user without a profile row cannot own later data, so the first-load upsert must run in the auth bootstrap path and be covered by tests.
-- Column-level grants must be extended deliberately whenever a new client-writable column is added; forgetting shows up as a clear permission error, never as silent data loss.
-- `set_updated_at()` is intentionally generic and reused by all later migrations; no future migration should redeclare it.
+- Portfolio↔broker-account mapping stays open; the join table will be added when import semantics are fixed. Adding it later is additive.
+- `unique (owner_id, id)` on `portfolios` is redundant today; it exists solely so the ownership-safe composite FK for `default_portfolio_id` needs no table rewrite.
+- Broker seed rows are identified by stable `code`; later seeds must upsert on `code`, never re-insert.
+- If the full broker client identifier is ever needed, it is a separate reviewed migration with its own privacy decision — not a widening of `account_ref_masked`.
 
-## Verification after eventual deployment
+## Post-deployment verification (run after approval)
 
-1. `public` contains exactly `profiles` and `user_settings`.
-2. Columns, types, nullability, defaults and check constraints match this proposal; `display_decimals` absent.
-3. `confdeltype = 'r'` (RESTRICT) on both foreign keys.
-4. RLS enabled on both; `pg_policies` shows exactly 6 policies, all `roles = {authenticated}`.
-5. Column privileges: `has_column_privilege('authenticated','public.profiles','created_at','UPDATE')` is false; same for `updated_at` on both tables and for INSERT on those columns. `has_table_privilege('authenticated', ..., 'DELETE')` false.
-6. `anon` has no privilege of any kind on either table.
-7. `set_updated_at` has `prosecdef = false` and empty `search_path`; both triggers present.
-8. Signed-in smoke tests: own-row upsert succeeds; an attempt to write `created_at` is rejected; an UPDATE bumps `updated_at` automatically; inserting a row with another user's id fails; a second user cannot read the first user's rows; deleting the auth user fails with a FK restriction.
-9. Migration 01's 12 enum types unchanged.
-10. Type check and build clean; repository secret scan clean.
-
-## Confirmations
-
-- Migration 02 has **not** been applied; the SQL file has not been created.
-- No remote Supabase schema change has been made.
-- No secrets, API keys, tokens or credentials appear in code, SQL or documentation.
-- No service-role key is introduced or used.
+1. Exactly three new tables in `public`; Migration 01's 12 enums and Migration 02's two tables unchanged.
+2. `relacl` on each new table shows no `anon` entry and only the approved `authenticated` privileges; `information_schema.column_privileges` shows no INSERT/UPDATE on `created_at`/`updated_at`.
+3. All three FKs report `confdeltype = 'r'`.
+4. RLS enabled on all three; exactly seven policies with the approved names.
+5. Behavioural, as two real signed-in users: own portfolio/account insert succeeds; cross-user select/update returns nothing; forged `created_at` insert is rejected; DELETE rejected; broker insert/update/delete rejected; broker select succeeds; profile deletion blocked by the portfolio FK.
+6. Update of a row advances `updated_at` via the existing trigger.
+7. Secret scan, type check and build clean; no service-role credential used by the application.
