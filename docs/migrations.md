@@ -19,6 +19,7 @@ Rules (from the Database Architecture and Development Rules documents):
 | `db/migrations/0001_enums.sql` | 2026-09-05 | 12 enum types: `asset_class`, `portfolio_role`, `txn_type`, `txn_state`, `data_quality_state`, `data_quality_issue`, `import_batch_state`, `corp_action_type`, `credit_action`, `coverage_state`, `credit_outlook`, `rating_watch` | None — types only; no tables, functions, policies or grants | Yes — remote `pg_type`/`pg_enum` match the approved proposal exactly; `pg_tables`, `pg_proc`, `pg_policies` and table grants in `public` all empty | Drop the 12 types in reverse order (SQL in file header). Safe only while no table uses them; never `drop ... cascade`. |
 | `db/migrations/0002_identity.sql` | 2026-09-06 07:02 UTC (12:32 IST) | `public.profiles`, `public.user_settings`, `public.set_updated_at()`, triggers `profiles_set_updated_at` / `user_settings_set_updated_at` | RLS enabled on both tables; exactly 6 owner-scoped policies (`SELECT`/`INSERT`/`UPDATE` per table, `TO authenticated`, `= auth.uid()`); no DELETE policy. Column-level grants applied as approved, **but see the open privilege issue below** | Partial — structure, FKs (`ON DELETE RESTRICT` both), RLS, policies and trigger function all verified correct. Privilege verification FAILED: Supabase's pre-existing `ALTER DEFAULT PRIVILEGES` grants `arwdDxtm` on every new `public` table to `anon`, `authenticated` and `service_role`, so the approved narrow column grants were additive and did not restrict anything | `begin; drop table if exists public.user_settings; drop table if exists public.profiles; drop function if exists public.set_updated_at(); commit;` (never `cascade`) |
 
+| `db/migrations/0002a_identity_privileges.sql` | 2026-09-06 07:28 UTC (12:58 IST) | No new objects — privilege correction only | `REVOKE ALL` on `profiles`/`user_settings` from `anon`, `authenticated`, then exact re-grant of the approved table/column privileges; `ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL` on tables/sequences and `REVOKE EXECUTE` on functions from `anon`, `authenticated`, `service_role` and `PUBLIC`; direct `EXECUTE` on `set_updated_at()` revoked from `PUBLIC`, `anon`, `authenticated` | Yes — see Migration 02a verification below | Rollback SQL in the file header (restores Supabase's permissive defaults; not recommended) |
 
 ## Live schema state
 
@@ -43,6 +44,30 @@ Open issue (requires a follow-up migration, not yet applied):
 - Consequences today: `anon` is still fully blocked by RLS (no policies apply to it) and DELETE is still blocked by RLS, but an authenticated user CAN write audit timestamps — verified: an own-row INSERT supplying `created_at = 1999-01-01` persisted, and a direct `UPDATE ... SET updated_at` succeeded.
 - Remedy to propose: `REVOKE ALL ON public.profiles, public.user_settings FROM anon, authenticated;` immediately before the approved column-level grants (and the same pattern in every future table migration).
 - Note: `set_updated_at()` uses `now()` (transaction start time), so an UPDATE inside the same transaction as the INSERT shows an unchanged `updated_at`. Across separate statements/transactions it advances normally.
+
+## Migration 02a verification results (2026-09-06)
+
+Creator role inspected before changing anything: `pg_default_acl` showed permissive
+`public` defaults owned by **`postgres`** (the role that applies PortfolioAI
+migrations) and by `supabase_admin` (Supabase-managed objects, left untouched).
+
+Verified remotely after applying 02a:
+- `relacl` on both tables: `{postgres=arwdDxtm, service_role=arwdDxtm, authenticated=r}` — `anon` absent entirely.
+- `authenticated` table privileges: `SELECT` only, on both tables. No INSERT/UPDATE/DELETE at table level.
+- Column privileges for `authenticated`: INSERT on `profiles(id, display_name)`; UPDATE on `profiles(display_name)`; INSERT on `user_settings(user_id, locale, timezone, date_format, number_locale)`; UPDATE on the same four settings columns. No INSERT/UPDATE on `created_at` or `updated_at` on either table.
+- Behavioural: forging `created_at` on INSERT → permission denied; writing `updated_at` → permission denied; own-row DELETE → permission denied; direct `select public.set_updated_at()` → permission denied for function; cross-user SELECT returns only own row and cross-user UPDATE affects 0 rows; a legitimate `display_name` UPDATE succeeded and advanced `updated_at` via the trigger while `created_at` stayed unchanged; `anon` SELECT → permission denied.
+- Unchanged: exactly the 6 approved RLS policies (all `{authenticated}`), RLS enabled on both tables, both FKs `confdeltype = 'r'` (RESTRICT), 12 Migration 01 enum types, `set_updated_at()` still `prosecdef = false` with `search_path=""` and `now()` semantics retained.
+- Future objects: `pg_default_acl` for role `postgres` in `public` now reads `r={postgres=arwdDxtm}`, `S={postgres=rwU}`, `f={postgres=X}` — no automatic privileges for `anon`, `authenticated`, `service_role` or `PUBLIC`. A probe table created inside a rolled-back transaction had `relacl = NULL` (owner-only).
+- No service-role key introduced or used by the application; secret scan and type check clean.
+
+## Binding migration rule — explicit grants only
+
+From Migration 02a onward, `public` objects created by the migration role
+receive **no** automatic Data API privileges. Every future PortfolioAI migration
+MUST explicitly `GRANT` the exact table/column/sequence/function privileges each
+new object requires (and only those), immediately after creating it, before
+enabling RLS and creating policies. Never rely on default privileges, and never
+grant `anon` access unless a policy deliberately allows anonymous reads.
 
 ## Corporate-action invariant (binding on all future migrations)
 
