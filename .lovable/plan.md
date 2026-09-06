@@ -1,280 +1,231 @@
-# Migration 04 — Security identity layer (revised proposal, planning only)
+# Migration 05 — `public.transactions` (proposal only, NOT applied)
 
-Proposed file: `db/migrations/0004_security_identity.sql`
+Confirmations: Migration 05 has **not** been applied; no migration file was created; no remote schema change was made; Migrations 01 / 02 / 02a / 03 / 04 are untouched; no UI work; no secrets, credentials or service-role key introduced into the application.
 
-Status: **NOT applied.** No permanent remote schema change was made during the capability inspection — every probe object was created inside a transaction that was rolled back, or in `pg_temp`, and absence was re-verified afterwards (`pg_class` count = 0). Migrations 01 / 02 / 02a / 03 remain untouched. No secrets or credentials introduced; no service-role credential is used by the application.
+Proposed filename: `db/migrations/0005_transactions.sql`
 
-## 1. Capability-check findings (read-only / rolled back)
+## 1. Design decisions (summary)
 
-| Check | Evidence | Result |
-|---|---|---|
-| PostgreSQL version | `PostgreSQL 17.6 on x86_64-pc-linux-gnu` | NFKC available (`normalize` exists since PG 13) |
-| Encoding / collation | `server_encoding = UTF8`, `datcollate = en_US.UTF-8`, `datlocprovider = i` (ICU) | `normalize()` is legal (it errors only on non-UTF8) |
-| `normalize(x, NFKC)` syntax | Works **unqualified only**. `pg_catalog.normalize(x, NFKC)` fails with `column "nfkc" does not exist`; the keyword form is parser sugar. `pg_catalog.normalize(x,'NFKC')` with a text literal works. | Use the unqualified keyword form inside the function; `pg_catalog` is always implicitly on the search path, so `set search_path = ''` is safe |
-| Volatility of every built-in used | `pg_proc.provolatile = 'i'` for `normalize(text,text)`, `upper(text)`, `btrim(text)`, all `regexp_replace` variants | All IMMUTABLE — the composite expression can legally be IMMUTABLE |
-| STORED generated column accepts it | Probe: `pg_temp` function marked IMMUTABLE + temp table `generated always as (fn(v)) stored` → `CREATE TABLE` and 6 inserts succeeded | Accepted |
-| Determinism of results | `'  m&m  '→'M&M'`, `'M_M'→'M_M'`, `'MM'→'MM'` (3 distinct values), `'reliance   industries'→'RELIANCE INDUSTRIES'`, `'M&M'+U+200B→'M&M'`, fullwidth `'ｍ＆ｍ'→'M&M'` | Correct and conservative; punctuation preserved; only compatibility-equivalent fullwidth forms fold, which is desirable |
-| Function default privileges | A freshly created `public` function still shows `proacl = NULL` and role `authenticated` **could execute it** in the probe, despite the 02a default-privilege hardening (`pg_default_acl` for `postgres`/`public`/`f` = `{postgres=X/postgres}`) | **Migration 04 must explicitly `REVOKE ALL ON FUNCTION ... FROM PUBLIC, anon, authenticated`** — the hardened default alone does not cover this case |
+| Question | Decision |
+|---|---|
+| Sign convention | **Always-positive magnitude**; direction is derived from `txn_type`. |
+| Price / amount | Both nullable; `unit_price` and `gross_amount` are each *source facts*, never derived or overwritten. |
+| Charges | `total_charges` only. Component-level brokerage/STT/GST/stamp **deferred**. |
+| Currency | Stored explicitly on the row, `char(3)` default `INR`, insert-only. |
+| Ownership | Composite FKs `(owner_id, portfolio_id)` and `(owner_id, broker_account_id)` — schema-level, no SECURITY DEFINER. |
+| Security | Required (`not null`). Unresolved rows belong in Migration 06 import staging. |
+| Date | `trade_date date` **nullable**. No settlement date in Phase 1. |
+| Lineage | Deferred to Migration 06 via `alter table`. Only `source_system` + `source_reference` now, plus a partial idempotency index. |
+| Reversal links | Deferred to Migration 07. `txn_state` exists now; links added additively later. |
+| Browser writes | **None.** Owner-scoped `SELECT` only. |
+| `updated_at` | Kept, but only metadata columns will ever move it; economic columns are immutable by grant. |
 
-Conclusion: full NFKC normalization is safe on this database and is retained. The minimum-safe fallback (trim / collapse whitespace / uppercase, punctuation preserved) was also verified to work in a generated column, and stays documented as the fallback if a future environment cannot support NFKC.
+## 2. Field-by-field schema and rationale
 
-## 2. Decisions (unchanged from the approved architecture)
+| Column | Type | Null | Class | Rationale |
+|---|---|---|---|---|
+| `id` | uuid pk default gen_random_uuid() | no | required | Stable ledger identity. |
+| `owner_id` | uuid → `profiles(id)` RESTRICT | no | required | Ownership anchor for RLS. |
+| `portfolio_id` | uuid | no | required | A ledger row must belong to one portfolio. |
+| `broker_account_id` | uuid | yes | useful now | Historical imports often lack the account; must not be fabricated. |
+| `security_id` | uuid → `securities(id)` RESTRICT | no | required | Canonical resolved instrument. Unresolved → staging. |
+| `txn_type` | `public.txn_type` | no | required | Existing enum, unchanged. |
+| `trade_date` | date | yes | required (nullable) | Unknown date stays NULL. Never substituted. |
+| `quantity` | numeric(38,18) | yes | required (nullable) | Positive magnitude; NULL only for INCOMPLETE imports. |
+| `unit_price` | numeric(38,18) | yes | required (nullable) | Absent for BONUS/SPLIT and many historical TRANSFER_IN rows. |
+| `gross_amount` | numeric(38,18) | yes | useful now | Source-supplied consideration; kept as-is even if ≠ qty×price. |
+| `total_charges` | numeric(38,18) | yes | useful now | Minimum viable auditability of net outflow. |
+| `currency` | char(3) not null default 'INR' | no | required | Interpretability if portfolio config later changes. |
+| `txn_state` | `public.txn_state` not null default 'ACTIVE' | no | required | Immutable-history model. |
+| `data_quality_state` | `public.data_quality_state` not null default 'VALID' | no | required | Discloses incompleteness downstream. |
+| `data_quality_issues` | `public.data_quality_issue[]` not null default '{}' | no | required | Explicit issue set, not free text. |
+| `source_system` | text ≤ 40 | yes | useful now | 'MANUAL', broker name etc.; label only. |
+| `source_reference` | text ≤ 128 | yes | useful now | Broker/source txn id, enables idempotency before import tables exist. |
+| `notes` | text ≤ 1000 | yes | useful now | Bounded. Raw payloads belong in Migration 06. |
+| `created_at` / `updated_at` | timestamptz not null default now() | no | required | DB-controlled; reuses `public.set_updated_at()` (not redeclared). |
 
-**Ownership: shared canonical reference data.** Instrument identity is not user-specific; per-user tables would fragment identity and corporate-action handling. `authenticated` gets SELECT only on both tables — no browser INSERT/UPDATE/DELETE at all. Master data is maintained through reviewed migrations, and later through an explicitly approved curation workflow. `created_at`/`updated_at` are database-controlled with no write grant to any browser role.
+**Deferred / premature (explicitly not added now):** `settlement_date`, `import_batch_id`, `import_source_row_id`, `reverses_transaction_id`, `supersedes_transaction_id`, per-component charges (brokerage, STT, GST, stamp, exchange, SEBI), FX rate, tax-lot columns, cost-basis or realised-P&L columns, raw source JSON, `is_deleted`.
 
-**Exchange: constrained text**, not an enum, not a reference table yet. `^[A-Z0-9]{2,12}$`, nullable (unlisted/mutual-fund/bond instruments legitimately have no venue). A reference table can be added later without changing column semantics.
+Precision: `numeric(38,18)` for quantity, price, amount and charges. Everything else uses the simplest correct type — `date` for the trade date, `char(3)` for currency, enums for vocabularies, bounded `text` for labels. No floating point anywhere.
 
-**Symbol: never globally unique.** Unique only within `(exchange, primary_symbol)`, and only when both are present. `primary_symbol` requires `exchange`.
+## 3. Sign convention
 
-**ISIN: nullable, globally unique when present.** An ISIN is a global instrument identifier, so two rows sharing one would be the same instrument recorded twice — exactly the silent duplication to prevent. Partial unique index, so the many rows without an ISIN are unaffected. Never fabricated. Syntax check only (`^[A-Z]{2}[A-Z0-9]{9}[0-9]$`); check-digit validation belongs in reviewed curation logic.
+Quantity is stored as a **positive magnitude** (`quantity > 0` when present); `txn_type` alone determines direction. This prevents a BUY silently carrying a negative quantity and reversing meaning, and it is enforceable by a single CHECK.
 
-**Currency:** `char(3)` NOT NULL default `'INR'`; immutable in practice because no browser UPDATE grant exists. Nothing else assumes INR.
+Conceptual quantity effect (derivation logic lands with `current_holdings`, not now):
 
-**Status:** `is_active`, `delisted_on`, `archived_at`. No DELETE grant, no CASCADE anywhere.
+- `BUY`, `OPENING_POSITION`, `TRANSFER_IN`, `BONUS` → increase
+- `SELL`, `TRANSFER_OUT` → decrease
+- `SPLIT` → quantity transformation, **not** additive; treated as a ratio event and only interpretable together with the later corporate-action master. A SPLIT ledger row and a corporate-action record must never both be applied to the same economic event.
+- `REVERSAL` → negates an earlier row; requires the Migration 07 link before it can be applied deterministically.
+- `ADJUSTMENT` → direction is not inferable from the type; requires explicit later semantics.
 
-**Alias type:** new enum `security_alias_type` — `EXCHANGE_SYMBOL`, `BROKER_SYMBOL`, `LEGACY_SYMBOL`, `ISIN`, `COMPANY_NAME`, `IMPORT_TEXT`, `OTHER`.
+Until SPLIT / REVERSAL / ADJUSTMENT semantics are formally approved, any holding derivation that encounters them for a security must report `INSUFFICIENT_DATA` / `UNRELIABLE` for that security rather than silently producing a number.
 
-## 3. Revision: `is_confirmed` removed
+## 4. Price / amount, charges, currency
 
-`is_confirmed` is dropped from `security_aliases`. Canonical alias identity and per-row import resolution are separate concepts: `security_aliases` states *what a source identifier means*, while a later import/resolution lineage table states *how a particular raw row was decided* (resolution method/status, selected security, `confirmed_by`, `confirmed_at`, source import row). Putting workflow state on the canonical table would mix a durable mapping with a one-off decision and make "manually confirmed" ambiguous. Import classification (resolved / unresolved / ambiguous / manually confirmed) is unaffected: it comes from lookup cardinality plus the future lineage table, backed by the existing `data_quality_issue` values `UNRESOLVED_SECURITY` and `AMBIGUOUS_SECURITY`.
+`unit_price` and `gross_amount` are both *supplied source facts*. Neither is generated from the other and neither is overwritten. If both are present and inconsistent with `quantity`, the row is not rejected: the discrepancy is a data-quality signal to be flagged (`NEEDS_REVIEW`) by the later trusted commit path, since a broker may legitimately report an all-in consideration. No accounting method (FIFO / LIFO / weighted average) is encoded, and no cost-basis or P&L column exists; those remain `INSUFFICIENT_DATA` until a methodology is separately approved.
 
-## 4. Revision: minimal alias-context integrity checks
+Charges: `total_charges` only. Component-level Indian charge modelling is explicitly deferred until a concrete tax/audit requirement exists.
 
-Three CHECK constraints only, no validation framework:
-- `alias_type = 'EXCHANGE_SYMBOL'` ⇒ `exchange` is not null (an exchange symbol without a venue is meaningless);
-- `alias_type = 'BROKER_SYMBOL'` ⇒ `source` is not null (a broker symbol without the broker is unresolvable);
-- `alias_type = 'ISIN'` ⇒ `alias_normalized` matches the same ISIN syntax as `securities.isin`.
+Currency is stored on the row (not inherited) so history stays interpretable if a portfolio's or security's configuration changes later. It is insert-only: excluded from every authenticated grant (there are none) and from all future browser update paths.
 
-`COMPANY_NAME`, `IMPORT_TEXT`, `LEGACY_SYMBOL` and `OTHER` require no context — they legitimately arrive with neither exchange nor source.
+## 5. Ownership enforcement
 
-The ISIN check references the generated column `alias_normalized`, which PostgreSQL permits in a table CHECK, and normalization (trim + uppercase) is exactly what makes the syntax check meaningful.
+Migration 03 already gives `portfolios` a `unique (owner_id, id)`. Migration 05 additively adds the matching `unique (owner_id, id)` on `broker_accounts` (non-destructive, no data change), then uses composite foreign keys:
 
-## 5. Alias uniqueness and resolution
+```
+foreign key (owner_id, portfolio_id)      references public.portfolios (owner_id, id)      on delete restrict
+foreign key (owner_id, broker_account_id) references public.broker_accounts (owner_id, id) on delete restrict
+```
 
-Unique key: `(alias_type, coalesce(source, ''), coalesce(exchange, ''), alias_normalized)`, enforced by an expression unique index so NULL contexts cannot escape the constraint.
+This makes owner/portfolio/broker-account agreement a **schema invariant**, not merely an RLS or application check. No SECURITY DEFINER function is introduced. `securities` is shared canonical data and carries no ownership, so it uses a plain FK.
 
-- one alias in one context → at most one security → **deterministic exact match**;
-- no matching row → **unresolved**;
-- same normalized alias under different contexts (two brokers using `M&M` for different instruments) stays representable, and a context-free lookup returning more than one row is **ambiguous** — the import engine decides, nothing merges silently;
-- **manually confirmed** is recorded later by the import lineage table, not here.
-
-No fuzzy matching, no scoring, no import tables.
-
-## 6. Normalization implementation
-
-`alias_value` keeps the raw source text for lineage. `alias_normalized` is a STORED generated column driven by `public.normalize_alias(text)`: `language sql`, `immutable`, `strict`, `security invoker`, `set search_path = ''` — never SECURITY DEFINER.
-
-Rules: NFKC → strip zero-width characters → collapse internal whitespace → trim → uppercase. Nothing else; `&`, `-`, `_`, `.`, `/` and all other punctuation are preserved, so `M&M`, `M_M` and `MM` remain three distinct values (verified).
-
-## 7. Privilege model (revised)
-
-| Object | `anon` | `authenticated` | `service_role` |
-|---|---|---|---|
-| `securities` | nothing | SELECT | ALL (PostgreSQL grant only) |
-| `security_aliases` | nothing | SELECT | ALL (PostgreSQL grant only) |
-| `normalize_alias(text)` | none (explicitly revoked) | none (explicitly revoked) | EXECUTE |
-
-The `PUBLIC`/`anon`/`authenticated` EXECUTE revoke is explicit because the capability check proved the 02a default hardening does not stop a new function from being PUBLIC-executable. The single `service_role` EXECUTE grant is retained for a concrete reason: `service_role` holds ALL on the tables, and PostgreSQL checks EXECUTE on functions used in a generated-column expression against the inserting role — without it, a `service_role` INSERT would fail. This is a PostgreSQL grant only; no service-role key exists in the application.
-
-RLS: enabled on both tables, exactly two policies, both SELECT-only for `authenticated`. No write policies exist, so even an accidental future grant is still blocked.
-
-## 8. Exact SQL (revised)
+## 6. Full SQL (for review)
 
 ```sql
--- 0004_security_identity.sql
--- PortfolioAI Migration 04 — canonical security identity + source aliases.
+-- 0005_transactions.sql
+-- PortfolioAI Migration 05 — canonical financial ledger.
 --
 -- Invariants:
---   * securities is the single canonical identity layer for instruments.
---     Shared reference data; the browser has SELECT only, never write.
---   * No security is ever DELETEd by the application: is_active / delisted_on /
---     archived_at carry lifecycle. Accounting history must never lose identity.
---   * ISIN is nullable and never fabricated; unique only when present.
---   * A symbol is unique only within an exchange, never globally.
---   * Alias normalization is deterministic and conservative: it must never
---     collapse legitimately distinct source symbols (M&M vs M_M vs MM).
---   * security_aliases records identity mappings ONLY. Per-row import
---     resolution state (resolved / unresolved / ambiguous / manually confirmed,
---     confirmed_by, confirmed_at) belongs to a later import-lineage table.
---   * Explicit-grant model (Migration 02a), plus an explicit function REVOKE:
---     verified that new public functions are otherwise PUBLIC-executable.
---   * Audit timestamps are database-controlled; reuses public.set_updated_at()
---     — NOT redeclared.
+--   * transactions are the accounting source of truth; holdings, cost basis
+--     and P&L are derived later, never stored here.
+--   * No browser INSERT/UPDATE/DELETE. Owner-scoped SELECT only.
+--   * Unknown trade dates stay NULL. Missing is not zero.
+--   * quantity is a positive magnitude; txn_type carries direction.
+--   * No accounting method (FIFO/LIFO/average) is encoded anywhere.
+--   * All foreign keys are ON DELETE RESTRICT.
+--   * Reuses public.set_updated_at(); it is NOT redeclared.
 --
--- Rollback (safe only while nothing references these objects):
+-- Rollback (safe only while no later migration references this table):
 -- begin;
--- drop table if exists public.security_aliases;
--- drop table if exists public.securities;
--- drop function if exists public.normalize_alias(text);
--- drop type if exists public.security_alias_type;
+-- drop table if exists public.transactions;
+-- alter table public.broker_accounts drop constraint if exists broker_accounts_owner_id_id_key;
 -- commit;
 
 begin;
 
-create type public.security_alias_type as enum (
-  'EXCHANGE_SYMBOL',
-  'BROKER_SYMBOL',
-  'LEGACY_SYMBOL',
-  'ISIN',
-  'COMPANY_NAME',
-  'IMPORT_TEXT',
-  'OTHER'
-);
+alter table public.broker_accounts
+  add constraint broker_accounts_owner_id_id_key unique (owner_id, id);
 
--- Unqualified normalize(..., NFKC) is required: the keyword form is parser
--- sugar and pg_catalog.normalize(x, NFKC) is a syntax error. pg_catalog is
--- always implicitly on the search path, so search_path = '' remains safe.
-create function public.normalize_alias(input text)
-returns text
-language sql
-immutable
-strict
-security invoker
-set search_path = ''
-as $$
-  select upper(
-    btrim(
-      regexp_replace(
-        regexp_replace(normalize(input, NFKC), '[\u200B-\u200D\uFEFF]', '', 'g'),
-        '\s+', ' ', 'g'
-      )
+create table public.transactions (
+  id                   uuid primary key default gen_random_uuid(),
+  owner_id             uuid not null references public.profiles(id) on delete restrict,
+  portfolio_id         uuid not null,
+  broker_account_id    uuid,
+  security_id          uuid not null references public.securities(id) on delete restrict,
+  txn_type             public.txn_type not null,
+  trade_date           date,
+  quantity             numeric(38,18),
+  unit_price           numeric(38,18),
+  gross_amount         numeric(38,18),
+  total_charges        numeric(38,18),
+  currency             char(3) not null default 'INR',
+  txn_state            public.txn_state not null default 'ACTIVE',
+  data_quality_state   public.data_quality_state not null default 'VALID',
+  data_quality_issues  public.data_quality_issue[] not null default '{}',
+  source_system        text,
+  source_reference     text,
+  notes                text,
+  created_at           timestamptz not null default now(),
+  updated_at           timestamptz not null default now(),
+
+  constraint transactions_portfolio_owner_fk
+    foreign key (owner_id, portfolio_id)
+    references public.portfolios (owner_id, id) on delete restrict,
+  constraint transactions_broker_account_owner_fk
+    foreign key (owner_id, broker_account_id)
+    references public.broker_accounts (owner_id, id) on delete restrict,
+
+  constraint transactions_quantity_positive
+    check (quantity is null or quantity > 0),
+  constraint transactions_unit_price_nonneg
+    check (unit_price is null or unit_price >= 0),
+  constraint transactions_gross_amount_nonneg
+    check (gross_amount is null or gross_amount >= 0),
+  constraint transactions_total_charges_nonneg
+    check (total_charges is null or total_charges >= 0),
+  constraint transactions_currency_format
+    check (currency ~ '^[A-Z]{3}$'),
+  constraint transactions_source_system_len
+    check (source_system is null or char_length(source_system) between 1 and 40),
+  constraint transactions_source_reference_len
+    check (source_reference is null or char_length(source_reference) between 1 and 128),
+  constraint transactions_notes_len
+    check (notes is null or char_length(notes) <= 1000),
+  constraint transactions_incomplete_disclosed
+    check (
+      (trade_date is not null and quantity is not null)
+      or data_quality_state in ('INCOMPLETE','NEEDS_REVIEW')
     )
-  )
-$$;
-
-comment on function public.normalize_alias(text) is
-  'Deterministic alias normalization: NFKC, strip zero-width, collapse whitespace, trim, uppercase. Punctuation (& - _ . /) is intentionally PRESERVED so distinct source symbols never collapse.';
-
-revoke all on function public.normalize_alias(text) from public;
-revoke all on function public.normalize_alias(text) from anon, authenticated;
-
-create table public.securities (
-  id uuid primary key default gen_random_uuid(),
-  asset_class public.asset_class not null default 'UNKNOWN',
-  name text not null check (char_length(name) between 1 and 200),
-  isin text check (isin is null or isin ~ '^[A-Z]{2}[A-Z0-9]{9}[0-9]$'),
-  exchange text check (exchange is null or exchange ~ '^[A-Z0-9]{2,12}$'),
-  primary_symbol text check (primary_symbol is null or primary_symbol ~ '^[A-Z0-9][A-Z0-9&._\-]{0,31}$'),
-  currency char(3) not null default 'INR' check (currency ~ '^[A-Z]{3}$'),
-  is_active boolean not null default true,
-  delisted_on date,
-  archived_at timestamptz,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  constraint securities_symbol_needs_exchange
-    check (primary_symbol is null or exchange is not null)
 );
 
-comment on table public.securities is
-  'Canonical instrument identity. Shared reference data; browser read-only. A symbol change does not create a new row when economic identity is unchanged.';
-comment on column public.securities.isin is
-  'Nullable. Never fabricated. Globally unique when present (partial unique index).';
-comment on column public.securities.currency is
-  'Instrument trading/denomination currency. Not editable from the browser.';
+comment on table public.transactions is
+  'Canonical financial ledger. Accounting source of truth. Browser read-only.';
+comment on column public.transactions.quantity is
+  'Positive magnitude only; direction is determined by txn_type.';
+comment on column public.transactions.gross_amount is
+  'Source-supplied consideration. Never derived from quantity x unit_price.';
 
-create unique index securities_isin_key
-  on public.securities (isin) where isin is not null;
-create unique index securities_exchange_symbol_key
-  on public.securities (exchange, primary_symbol)
-  where exchange is not null and primary_symbol is not null;
-create index securities_asset_class_idx on public.securities (asset_class);
-create index securities_active_idx on public.securities (is_active) where is_active;
+create index transactions_owner_idx        on public.transactions (owner_id);
+create index transactions_portfolio_idx    on public.transactions (portfolio_id);
+create index transactions_security_idx     on public.transactions (security_id);
+create index transactions_account_idx      on public.transactions (broker_account_id);
+create index transactions_active_pos_idx   on public.transactions (portfolio_id, security_id, trade_date)
+  where txn_state = 'ACTIVE';
+create unique index transactions_source_idem_idx
+  on public.transactions (owner_id, source_system, source_reference)
+  where source_system is not null and source_reference is not null;
 
-create table public.security_aliases (
-  id uuid primary key default gen_random_uuid(),
-  security_id uuid not null references public.securities(id) on delete restrict,
-  alias_type public.security_alias_type not null,
-  alias_value text not null check (char_length(alias_value) between 1 and 200),
-  alias_normalized text generated always as (public.normalize_alias(alias_value)) stored,
-  source text check (source is null or char_length(source) between 1 and 64),
-  exchange text check (exchange is null or exchange ~ '^[A-Z0-9]{2,12}$'),
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  constraint security_aliases_exchange_symbol_needs_exchange
-    check (alias_type <> 'EXCHANGE_SYMBOL' or exchange is not null),
-  constraint security_aliases_broker_symbol_needs_source
-    check (alias_type <> 'BROKER_SYMBOL' or source is not null),
-  constraint security_aliases_isin_syntax
-    check (alias_type <> 'ISIN' or alias_normalized ~ '^[A-Z]{2}[A-Z0-9]{9}[0-9]$')
-);
-
-comment on table public.security_aliases is
-  'Source-specific identifiers resolving to a canonical security. alias_value keeps raw source text for lineage; alias_normalized is deterministic. Identity mappings only — per-row import resolution state lives in a later import-lineage table. Uniqueness is per (alias_type, source, exchange, alias_normalized) so the same text under different contexts stays representable and is classified as ambiguous by the import engine rather than silently merged.';
-
-create unique index security_aliases_context_key
-  on public.security_aliases (
-    alias_type,
-    coalesce(source, ''),
-    coalesce(exchange, ''),
-    alias_normalized
-  );
-create index security_aliases_security_idx on public.security_aliases (security_id);
-create index security_aliases_normalized_idx on public.security_aliases (alias_normalized);
-
-create trigger securities_set_updated_at before update on public.securities
-  for each row execute function public.set_updated_at();
-create trigger security_aliases_set_updated_at before update on public.security_aliases
+create trigger transactions_set_updated_at before update on public.transactions
   for each row execute function public.set_updated_at();
 
-grant select on public.securities to authenticated;
-grant all on public.securities to service_role;
-grant select on public.security_aliases to authenticated;
-grant all on public.security_aliases to service_role;
-grant execute on function public.normalize_alias(text) to service_role;
+-- Explicit grants only (Migration 02a model).
+grant select on public.transactions to authenticated;
+grant all    on public.transactions to service_role;
 
-alter table public.securities enable row level security;
-alter table public.security_aliases enable row level security;
+alter table public.transactions enable row level security;
 
-create policy securities_select_all on public.securities
-  for select to authenticated using (true);
-create policy security_aliases_select_all on public.security_aliases
-  for select to authenticated using (true);
+create policy transactions_select_own on public.transactions
+  for select to authenticated using (owner_id = auth.uid());
 
 commit;
 ```
 
-No rows are seeded: no canonical security universe has been approved, and fabricating instruments would violate the no-fabricated-facts rule.
+## 7. Privileges, RLS and immutability
 
-## 9. Field classification
+- `anon`: no privileges, no policy — no access at all.
+- `authenticated`: `SELECT` only, owner-scoped by the single policy. **No** INSERT, UPDATE or DELETE grant and no corresponding policy, so the ledger is browser read-only even if a policy were later added by mistake.
+- `service_role`: full PostgreSQL grants, used by the trusted server-side commit path in Migration 06/07. No service-role credential enters the application.
 
-`securities` — Phase 1 required: `id`, `asset_class`, `name`, `currency`, `created_at`, `updated_at`. Useful and safe now: `isin`, `exchange`, `primary_symbol`, `is_active`, `delisted_on`, `archived_at`. Premature/deferred: sector, industry, market-cap band, lot size, face value, listing date, issuer/entity link (Credit Intelligence needs an issuer table, not a column here), index membership, series (`EQ`/`BE`), FIGI and other identifier columns, any market data or fundamentals.
+Immutable-history model: corrections never edit an economic fact. A mistaken row is marked `SUPERSEDED` or offset by a `REVERSAL` row written by the trusted path; `txn_state` already exists for this. `updated_at` is retained because state and data-quality metadata legitimately change over time under trusted writes; economic columns cannot change from the browser because no UPDATE grant exists at all.
 
-`security_aliases` — Phase 1 required: `id`, `security_id`, `alias_type`, `alias_value`, `alias_normalized`, `created_at`. Useful and safe now: `source`, `exchange`, `updated_at`. Premature/deferred: `is_confirmed` (**removed this revision**), resolution method/status, `confirmed_by`, `confirmed_at`, validity periods, confidence scores, anything fuzzy-matching related.
+## 8. Deletion behaviour
 
-## 10. Deletion behaviour
+Every FK is `ON DELETE RESTRICT`: `owner_id → profiles`, `(owner_id, portfolio_id) → portfolios`, `(owner_id, broker_account_id) → broker_accounts`, `security_id → securities`. No CASCADE, no SET NULL anywhere. Deleting an Auth user, profile, portfolio, broker account or security cannot erase ledger history; removal is archival (`archived_at`, `is_active`). There is no browser DELETE path.
 
-- `security_aliases.security_id -> securities(id)` **ON DELETE RESTRICT** — a canonical security referenced by aliases (and later by transactions) must never vanish; retirement is `is_active = false` / `archived_at`.
-- No CASCADE, no SET NULL, no NO ACTION anywhere; no DELETE privilege for `anon` or `authenticated`.
+## 9. Forward compatibility
 
-## 11. Corporate-action and import compatibility
+- **Migration 06 (imports):** adds `import_batch_id` and `import_source_row_id` by `alter table ... add column ... references ... on delete restrict`. Nothing dangling is created now.
+- **Migration 07 (corrections):** adds `reverses_transaction_id` / `supersedes_transaction_id` self-FKs with RESTRICT and a `check (id <> ...)` self-reference guard.
+- **Corporate actions:** the later master table must reconcile against SPLIT/BONUS ledger rows so the same economic event is never counted twice.
+- **`current_holdings`:** derivable as a deterministic aggregation over `txn_state = 'ACTIVE'` rows grouped by `(portfolio_id, security_id)`, supported by `transactions_active_pos_idx`. Any group containing an unresolved SPLIT, REVERSAL or ADJUSTMENT reports `UNRELIABLE`/`INSUFFICIENT_DATA` instead of a number. Quantity may become derivable before cost basis; cost basis and P&L stay unavailable until an accounting method is approved.
 
-- Symbol change: update `primary_symbol`, add a `LEGACY_SYMBOL` alias. Identity row unchanged.
-- ISIN change: update `isin`, add an `ISIN`-type alias for the old value. Identity row unchanged.
-- Merger/demerger/spin-off: new `securities` rows plus future corporate-action records linking old and new identities; the old row is deactivated, never deleted.
-- Split/bonus: no identity effect — they are accounting events.
-- Delisting: `is_active = false`, `delisted_on` set; history retained.
-- Import: a raw row with ticker only, name only, ISIN, exchange+symbol or a broker symbol resolves against `security_aliases` via `(alias_type, source, exchange, normalize_alias(raw))`, and is classified by the future lineage table.
+## 10. Post-deployment verification and behavioural tests
 
-## 12. Risks
+Structural queries: one new table only; no new enum or function; Migrations 01–04 objects unchanged; four FKs all `confdeltype = 'r'`; six indexes present; RLS enabled with exactly one SELECT policy; ACL shows `authenticated=r` and no `anon`; `set_updated_at()` unchanged and trigger attached; Migration 02a default-privilege hardening intact.
 
-- Global ISIN uniqueness rejects a genuine duplicate rather than merging it — intended; curation must handle it explicitly.
-- The generated column depends on `normalize_alias`, so changing normalization later requires a reviewed migration that rebuilds the column and unique index — deliberately not a silent change.
-- Free-text `exchange` allows typos; mitigated by the CHECK and, later, a reference table.
-- NFKC folds compatibility-equivalent forms (fullwidth `ｍ＆ｍ` → `M&M`). Verified as desirable, but recorded as a behaviour, not an accident.
-- No seed data means everything is unresolved until a universe is loaded through a reviewed migration — correct behaviour, not a defect.
+Behavioural tests (savepointed and rolled back, as service_role plus two impersonated users):
 
-## 13. Post-deployment verification plan
+1. Portfolio owned by user B rejected on a transaction owned by user A (composite FK).
+2. Broker account owned by user B likewise rejected.
+3. `quantity = 0` and negative quantity/price/charges rejected.
+4. NULL `trade_date` with `VALID` rejected; with `INCOMPLETE` accepted.
+5. Lowercase currency rejected; default `INR` applied.
+6. Duplicate `(owner, source_system, source_reference)` rejected; multiple NULL references accepted.
+7. Authenticated user sees only own rows; INSERT / UPDATE / DELETE all denied.
+8. Anonymous access denied.
+9. Deleting a referenced profile, portfolio, broker account or security blocked.
+10. Privileged update advances `updated_at`.
 
-Structural: exactly two new tables; the 12 Migration 01 enums unchanged plus exactly one new enum `security_alias_type` with 7 values in order; `profiles`, `user_settings`, `brokers`, `portfolios`, `broker_accounts` unchanged; `pg_default_acl` for `postgres`/`public` still owner-only; `set_updated_at()` unchanged and reused (`prosecdef = false`); `normalize_alias` is `provolatile = 'i'`, `proisstrict = true`, `prosecdef = false`, `search_path=""`, and its `proacl` grants EXECUTE to `service_role` only (no `PUBLIC`, `anon` or `authenticated` entry).
-
-Constraint tests: duplicate ISIN rejected; two NULL ISINs accepted; duplicate `(exchange, primary_symbol)` rejected; the same symbol on two exchanges accepted; `primary_symbol` without `exchange` rejected; malformed ISIN/exchange/currency rejected; FK `confdeltype = 'r'` and deleting a referenced security blocked.
-
-New alias-context tests: `EXCHANGE_SYMBOL` without `exchange` rejected, with `exchange` accepted; `BROKER_SYMBOL` without `source` rejected, with `source` accepted; `ISIN` alias with `'INE101A01026'` accepted and with `'INE101A0102'` rejected; `COMPANY_NAME` / `IMPORT_TEXT` / `LEGACY_SYMBOL` / `OTHER` accepted with neither context. Confirm `security_aliases` has **no** `is_confirmed` column.
-
-Normalization tests: `'  m&m  '→'M&M'`; `'M_M'→'M_M'`; `'MM'→'MM'` (three distinct); `'reliance   industries'→'RELIANCE INDUSTRIES'`; zero-width character stripped.
-
-Uniqueness tests: the same normalized alias with the same type/source/exchange rejected; the same normalized alias under a different `source` or `exchange` accepted, and a context-free lookup then returns >1 row (ambiguous).
-
-Privilege/RLS tests (signed-in, rolled back): `authenticated` SELECT succeeds on both tables; INSERT/UPDATE/DELETE denied on both; `authenticated` and `anon` cannot EXECUTE `normalize_alias`; `anon` denied on both tables; RLS enabled with exactly two policies; `updated_at` advances on a privileged UPDATE via the reused trigger.
-
-Repository: secret scan, type check and build clean; `docs/migrations.md` and `roadmap.md` updated after deployment (roadmap entry for Migration 04 will be added at that point — plan mode does not modify repository files).
+Repository: secret scan, type check, build; then `docs/migrations.md` and `roadmap.md` updated with UTC and IST timestamps.
