@@ -184,6 +184,12 @@ create table public.transactions (
           and broker_account_id is not null)
     ),
 
+  -- A missing broker ACCOUNT relationship must be disclosed as MISSING_ACCOUNT.
+  -- MISSING_BROKER does not satisfy this: it is reserved for an unknown source
+  -- institution during import/staging.
+  constraint transactions_missing_account_disclosed
+    check (broker_account_id is not null or 'MISSING_ACCOUNT' = any(data_quality_issues)),
+
   -- Temporary Phase-1 rule: types without deterministic semantics may not be
   -- presented as valid canonical facts. To be relaxed by a later reviewed
   -- migration once split-ratio / reversal-linkage / adjustment semantics exist.
