@@ -1,4 +1,4 @@
-# Migration 05 — `public.transactions` (revised proposal, NOT applied)
+# Migration 05 — `public.transactions` (final proposal, NOT applied)
 
 Confirmations: Migration 05 remains **not applied**; no migration file has been created; no remote schema change was made; Migrations 01 / 02 / 02a / 03 / 04 are untouched; no UI work; no secret or service-role credential was added to the application.
 
@@ -301,11 +301,12 @@ Structural: exactly one new table and one new function; no new enum; Migrations 
 2. `quantity = 0`, negative quantity/price/charges, lowercase currency all rejected; `INR` default applied.
 3. `VALID` with a non-empty issue array rejected; `INCOMPLETE`/`NEEDS_REVIEW` with an empty array rejected.
 4. `VALID` with NULL `trade_date`, NULL `quantity`, or NULL `broker_account_id` each rejected; the same rows accepted as `INCOMPLETE` with an issue.
-5. SPLIT / REVERSAL / ADJUSTMENT rejected unless `NEEDS_REVIEW`; BONUS accepted normally.
-6. Repeated `(owner_id, source_system, source_reference)` values **accepted** (no idempotency index).
-7. Privileged (service_role) updates to `quantity`, `unit_price`, `gross_amount`, `total_charges`, `security_id`, `portfolio_id`, `broker_account_id`, `owner_id`, `txn_type`, `trade_date`, `currency`, `source_system`, `source_reference` and `created_at` each rejected by the guard.
-8. Privileged metadata-only update (`txn_state`, `data_quality_state`, `data_quality_issues`, `notes`) succeeds and advances `updated_at`.
-9. Authenticated user sees only own rows; INSERT/UPDATE/DELETE denied; anonymous access denied.
-10. Deleting a referenced profile, portfolio, broker account or security blocked.
+5. `broker_account_id` NULL + `INCOMPLETE` + `MISSING_ACCOUNT` accepted; NULL + `INCOMPLETE` without `MISSING_ACCOUNT` rejected; `MISSING_BROKER` alone does not satisfy the missing-account constraint.
+6. SPLIT / REVERSAL / ADJUSTMENT rejected unless `NEEDS_REVIEW`; BONUS accepted normally.
+7. Repeated `(owner_id, source_system, source_reference)` values **accepted** (no idempotency index).
+8. Privileged (service_role) updates to `quantity`, `unit_price`, `gross_amount`, `total_charges`, `security_id`, `portfolio_id`, `broker_account_id`, `owner_id`, `txn_type`, `trade_date`, `currency`, `source_system`, `source_reference` and `created_at` each rejected by the guard.
+9. Privileged metadata-only update (`txn_state`, `data_quality_state`, `data_quality_issues`, `notes`) succeeds and advances `updated_at`.
+10. Authenticated user sees only own rows; INSERT/UPDATE/DELETE denied; anonymous access denied.
+11. Deleting a referenced profile, portfolio, broker account or security blocked.
 
 Repository afterwards: secret scan, type check, build; then `docs/migrations.md` and `roadmap.md` updated with UTC and IST timestamps.
