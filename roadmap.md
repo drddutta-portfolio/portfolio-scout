@@ -9,5 +9,9 @@
       created_at/updated_at not client-writable, set_updated_at() not directly callable,
       future public objects have no automatic Data API privileges
 
+## In progress
+- [ ] Migration 03 (db/migrations/0003_portfolio_foundation.sql) — approved; applying brokers
+      (seed: OTHER only), portfolios, broker_accounts; then remote verification and docs update
+
 ## Next (awaiting approval)
-- [ ] Migration 03 — not started
+- [ ] Migration 04 — not started (do not begin until Migration 03 is reported and approved)
