@@ -282,7 +282,7 @@ begin
   -- Effective execution identity, not the session role: a SECURITY DEFINER RPC
   -- owned by a privileged role switches current_user away from 'authenticated'
   -- even though the session role stays 'authenticated'.
-  if pg_catalog.current_user = 'authenticated'
+  if current_user::text = 'authenticated'
      and new.state is distinct from old.state
      and new.state in ('COMMITTING','COMMITTED','FAILED') then
     raise exception 'import_batches: % is set only by the trusted server path', new.state
