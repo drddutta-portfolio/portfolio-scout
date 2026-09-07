@@ -117,7 +117,7 @@ create table public.import_source_rows (
   resolution                public.import_row_resolution not null default 'UNRESOLVED',
   data_quality_state        public.data_quality_state not null default 'INCOMPLETE',
   data_quality_issues       public.data_quality_issue[] not null default '{}',
-  duplicate_of_row_id       uuid references public.import_source_rows(id) on delete restrict,
+  duplicate_of_row_id       uuid,
   duplicate_reason          text,
   created_at                timestamptz not null default now(),
   updated_at                timestamptz not null default now(),
@@ -128,6 +128,10 @@ create table public.import_source_rows (
     foreign key (owner_id, candidate_broker_account_id)
     references public.broker_accounts (owner_id, id) on delete restrict,
   constraint import_source_rows_owner_id_id_key unique (owner_id, id),
+  -- Owner-safe self reference; deliberately NOT restricted to the same batch.
+  constraint import_source_rows_duplicate_owner_fk
+    foreign key (owner_id, duplicate_of_row_id)
+    references public.import_source_rows (owner_id, id) on delete restrict,
   constraint import_source_rows_batch_ordinal_key unique (import_batch_id, source_row_number),
   constraint import_source_rows_ordinal_positive check (source_row_number >= 1),
   constraint import_source_rows_qty_nonneg check (candidate_quantity is null or candidate_quantity > 0),
@@ -144,8 +148,12 @@ create table public.import_source_rows (
     (security_resolution = 'RESOLVED') = (candidate_security_id is not null)),
   constraint import_source_rows_valid_no_issues check (
     data_quality_state <> 'VALID' or cardinality(data_quality_issues) = 0),
+  -- An initial UNRESOLVED row may have no issue yet: validation has not run.
+  -- Once past UNRESOLVED, a non-VALID state must name at least one issue.
   constraint import_source_rows_flagged_has_issue check (
-    data_quality_state = 'VALID' or cardinality(data_quality_issues) >= 1),
+    resolution = 'UNRESOLVED'
+    or data_quality_state = 'VALID'
+    or cardinality(data_quality_issues) >= 1),
   constraint import_source_rows_missing_account_disclosed check (
     candidate_broker_account_id is not null
     or 'MISSING_ACCOUNT' = any(data_quality_issues)
@@ -228,9 +236,29 @@ begin
     raise exception 'import_source_rows: raw source evidence is immutable'
       using errcode = 'restrict_violation';
   end if;
-  if old.resolution = 'COMMITTED' and new.resolution is distinct from old.resolution then
-    raise exception 'import_source_rows: a COMMITTED row cannot be re-opened'
-      using errcode = 'restrict_violation';
+  -- After commit the interpretation that produced the canonical transaction is
+  -- audit evidence too: it freezes completely. RESOLVED -> COMMITTED still works.
+  if old.resolution = 'COMMITTED' then
+    if new.resolution          is distinct from old.resolution
+    or new.candidate_security_id       is distinct from old.candidate_security_id
+    or new.candidate_broker_account_id is distinct from old.candidate_broker_account_id
+    or new.candidate_txn_type          is distinct from old.candidate_txn_type
+    or new.candidate_trade_date        is distinct from old.candidate_trade_date
+    or new.candidate_quantity          is distinct from old.candidate_quantity
+    or new.candidate_unit_price        is distinct from old.candidate_unit_price
+    or new.candidate_gross_amount      is distinct from old.candidate_gross_amount
+    or new.candidate_total_charges     is distinct from old.candidate_total_charges
+    or new.candidate_currency          is distinct from old.candidate_currency
+    or new.candidate_fingerprint       is distinct from old.candidate_fingerprint
+    or new.security_resolution         is distinct from old.security_resolution
+    or new.data_quality_state          is distinct from old.data_quality_state
+    or new.data_quality_issues         is distinct from old.data_quality_issues
+    or new.duplicate_of_row_id         is distinct from old.duplicate_of_row_id
+    or new.duplicate_reason            is distinct from old.duplicate_reason
+    then
+      raise exception 'import_source_rows: a COMMITTED row''s interpretation is immutable'
+        using errcode = 'restrict_violation';
+    end if;
   end if;
   return new;
 end; $$;
@@ -251,7 +279,10 @@ begin
     raise exception 'import_batches: COMMITTED is terminal'
       using errcode = 'restrict_violation';
   end if;
-  if pg_catalog.current_setting('role', true) = 'authenticated'
+  -- Effective execution identity, not the session role: a SECURITY DEFINER RPC
+  -- owned by a privileged role switches current_user away from 'authenticated'
+  -- even though the session role stays 'authenticated'.
+  if current_user::text = 'authenticated'
      and new.state is distinct from old.state
      and new.state in ('COMMITTING','COMMITTED','FAILED') then
     raise exception 'import_batches: % is set only by the trusted server path', new.state
@@ -316,11 +347,24 @@ create policy import_source_rows_insert_own on public.import_source_rows
     and exists (select 1 from public.import_batches b
                 where b.id = import_batch_id and b.owner_id = auth.uid()
                   and b.state in ('UPLOADED','PREVIEWED')));
+-- Row editing also requires an editable PARENT BATCH: never while the trusted
+-- commit path is reading the batch (COMMITTING) or after it finished (COMMITTED).
 create policy import_source_rows_update_own on public.import_source_rows
-  for update to authenticated using (owner_id = auth.uid() and resolution <> 'COMMITTED')
-  with check (owner_id = auth.uid() and resolution in ('UNRESOLVED','RESOLVED','EXCLUDED'));
+  for update to authenticated
+  using (owner_id = auth.uid() and resolution <> 'COMMITTED'
+    and exists (select 1 from public.import_batches b
+                where b.id = import_batch_id and b.owner_id = auth.uid()
+                  and b.state in ('UPLOADED','PREVIEWED','VALIDATED','AWAITING_CONFIRMATION')))
+  with check (owner_id = auth.uid() and resolution in ('UNRESOLVED','RESOLVED','EXCLUDED')
+    and exists (select 1 from public.import_batches b
+                where b.id = import_batch_id and b.owner_id = auth.uid()
+                  and b.state in ('UPLOADED','PREVIEWED','VALIDATED','AWAITING_CONFIRMATION')));
 create policy import_source_rows_delete_own on public.import_source_rows
-  for delete to authenticated using (owner_id = auth.uid() and resolution <> 'COMMITTED');
+  for delete to authenticated
+  using (owner_id = auth.uid() and resolution <> 'COMMITTED'
+    and exists (select 1 from public.import_batches b
+                where b.id = import_batch_id and b.owner_id = auth.uid()
+                  and b.state in ('UPLOADED','PREVIEWED','VALIDATED','REJECTED','FAILED')));
 
 commit;
 ```
@@ -344,3 +388,47 @@ Batch idempotency for the future `commit_import_batch`: `(owner_id, client_reque
 Structural: exactly two new tables and two new enums, existing 13 enums and all prior tables unchanged, one new nullable column on `transactions`, all FKs `confdeltype='r'`, expected indexes/uniques, RLS on with the eight listed policies, `relacl` showing no `anon`, functions `prosecdef=false` with `search_path=''` and no `anon`/`authenticated` EXECUTE.
 
 Behavioural (all in rolled-back transactions): cross-owner batch/row/account/lineage inserts rejected; duplicate ordinal rejected; two legitimate identical rows accepted; raw-field UPDATE rejected while candidate UPDATE succeeds and advances `updated_at`; `authenticated` cannot set `COMMITTING`/`COMMITTED`/`FAILED`, cannot re-open a `COMMITTED` batch or row, cannot delete a committed batch/row, cannot INSERT/UPDATE/DELETE `transactions`; `anon` denied everywhere; deleting a batch whose rows exist is blocked; deleting a source row referenced by a transaction is blocked; a second transaction on the same source row is rejected; all Migration 05 immutability checks still fail, now including `import_source_row_id`. Then secret scan, `tsgo --noEmit`, build, and documentation updates.
+
+Added tests for amendment 1: initial raw-row INSERT with grant-visible columns only succeeds (defaults `UNRESOLVED` / `INCOMPLETE` / `{}`); `UNRESOLVED` + `INCOMPLETE` + empty issues succeeds; `RESOLVED` + `INCOMPLETE` + empty issues fails; `RESOLVED` + `NEEDS_REVIEW` + empty issues fails; `VALID` + non-empty issues still fails.
+
+Added tests for amendment 2: same-owner cross-batch `duplicate_of_row_id` succeeds; cross-owner duplicate reference fails on `import_source_rows_duplicate_owner_fk`; self-reference fails on `import_source_rows_dup_not_self`; deleting a row referenced as a duplicate is blocked by RESTRICT.
+
+Added tests for amendment 3: as `authenticated`, `UPLOADED→PREVIEWED→VALIDATED→AWAITING_CONFIRMATION` and `→REJECTED` succeed, while `→COMMITTING`, `→COMMITTED` and `→FAILED` raise `insufficient_privilege`; the same transitions performed through a throwaway SECURITY DEFINER probe function owned by `postgres` (created and dropped inside the rolled-back test transaction only, never shipped) succeed, proving Migration 07 compatibility; `COMMITTED` remains terminal for every identity.
+
+Added tests for amendment 4: row UPDATE and DELETE by the owner succeed while the parent batch is `UPLOADED`/`PREVIEWED`/`VALIDATED`/`AWAITING_CONFIRMATION`, and affect zero rows once the batch is `COMMITTING` or `COMMITTED`; the trusted transition `RESOLVED → COMMITTED` succeeds; every later change to a `COMMITTED` row's candidate/resolution/duplicate/data-quality fields raises `import_source_rows: a COMMITTED row's interpretation is immutable`.
+
+## 8. The four amendments, in detail
+
+**1 — Initial insert is now possible without fabricating anything.** `import_source_rows_flagged_has_issue` is relaxed to `resolution = 'UNRESOLVED' OR data_quality_state = 'VALID' OR cardinality(data_quality_issues) >= 1`. A freshly staged row is `UNRESOLVED` with no issues because validation has not run — that is honest, not a claim of validity. `VALID ⇒ zero issues` is unchanged, and the moment a row leaves `UNRESOLVED` any non-`VALID` state must name at least one issue. Nothing is auto-marked `VALID` and no issue is invented.
+
+**2 — Duplicate references are owner-safe.** `duplicate_of_row_id` loses its plain FK and gains the composite self-FK `(owner_id, duplicate_of_row_id) → import_source_rows(owner_id, id) ON DELETE RESTRICT`, reusing `unique (owner_id, id)`. Same-owner cross-batch duplicate detection stays legal (that is the common real case: the same trade appearing in a later file); cross-owner references are impossible at schema level; self-reference stays blocked.
+
+**3 — Trusted-path detection is Migration 07 compatible.** The guard tests `current_user`, the effective execution identity, not the session role. A direct browser call executes with `current_user = 'authenticated'` and is refused `COMMITTING`/`COMMITTED`/`FAILED`. Migration 07's hardened narrow SECURITY DEFINER RPC will be owned by a privileged role, so inside it `current_user` becomes the function owner while the session role is still `authenticated` — the guard permits the transition, and the RPC itself remains responsible for validating `auth.uid()` ownership and re-running validation. No RPC is created here.
+
+**4 — Rows freeze with their parent batch.** Browser UPDATE and DELETE of `import_source_rows` now additionally require the parent batch to be in an editable state (`UPLOADED`, `PREVIEWED`, `VALIDATED`, `AWAITING_CONFIRMATION`; DELETE also allows `REJECTED`/`FAILED`), closing the race where interpretation changes while the trusted commit reads the batch. And once `resolution = 'COMMITTED'`, the guard freezes the whole interpretation — candidates, resolution, duplicate fields and data quality — not just the resolution value, because that interpretation is the audit trail for the canonical transaction it produced. The normal trusted `RESOLVED → COMMITTED` transition is unaffected.
+
+## 9. Rollback SQL
+
+```sql
+begin;
+drop index if exists public.transactions_source_row_uidx;
+alter table public.transactions
+  drop constraint if exists transactions_source_row_owner_fk,
+  drop column if exists import_source_row_id;
+-- Restore the Migration 05 guard body verbatim (without the lineage check).
+-- \i db/migrations/0005_transactions.sql is NOT re-run; only the function is
+-- recreated from its Migration 05 definition.
+drop table if exists public.import_source_rows;
+drop table if exists public.import_batches;
+drop function if exists public.import_source_rows_guard_raw();
+drop function if exists public.import_batches_guard_state();
+drop type if exists public.import_row_resolution;
+drop type if exists public.security_resolution_state;
+commit;
+```
+
+Never `cascade`; never drop the shared `public.set_updated_at()`. Rollback is safe only while no canonical transaction carries lineage — if any does, the `RESTRICT` FK will block the drop, which is the intended protection.
+
+## 10. Confirmations
+
+Migration 06 is **NOT APPLIED**. No migration file has been created, no remote schema was modified, Migration 05 remains untouched (its guard is only extended by this proposal, on approval), no canonical transactions were inserted, no UI work was done, no `commit_import_batch` RPC exists, and no service-role credential or secret was introduced anywhere.
