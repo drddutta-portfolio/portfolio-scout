@@ -37,7 +37,15 @@
       no economic-content uniqueness, RLS + 8 policies, explicit column grants, no anon access,
       no service-role credential in the application
 
+- [x] Migration 07 (db/migrations/0007_commit_import_batch.sql) — applied and verified 2026-09-07 04:43 UTC (10:13 IST):
+      public.commit_import_batch(uuid) is the only new object — SECURITY DEFINER, owner postgres,
+      search_path="", EXECUTE for authenticated only (PUBLIC/anon revoked), auth.uid() identity,
+      FOR UPDATE batch lock, AWAITING_CONFIRMATION -> COMMITTING -> COMMITTED, explicit batch/portfolio/
+      source-row ownership revalidation, RESOLVED+VALID+zero-issues eligibility, EXCLUDED preserved,
+      SPLIT/REVERSAL/ADJUSTMENT non-committable, explicit currency, no fabricated facts, one canonical
+      transaction per source row, idempotent retry, atomic all-or-nothing, recomputed counters;
+      31/31 behavioural checks passed in rolled-back transactions, zero residual data,
+      no service-role credential in the application
+
 ## Next (awaiting approval)
-- [ ] Migration 07 (commit_import_batch trusted RPC) — proposal revised with the two final
-      corrections (explicit per-row owner revalidation, exact empty-issues eligibility condition);
-      awaiting final approval. NOT applied, no migration file created
+- [ ] Migration 08 (current_holdings / portfolio_security_settings / corporate_actions) — NOT started
