@@ -308,6 +308,18 @@ begin
     raise exception 'commit_import_batch: batch not found' using errcode = '42501';
   end if;
 
+  -- explicit source-row ownership revalidation: the composite FK already makes
+  -- this impossible, but the trusted commit boundary verifies it explicitly and
+  -- never merely filters such rows out of the commit loop.
+  select count(*) into v_bad
+    from public.import_source_rows r
+   where r.import_batch_id = v_batch.id
+     and r.owner_id <> v_uid;
+  if v_bad > 0 then
+    raise exception 'commit_import_batch: inconsistent ownership in batch'
+      using errcode = '40002';
+  end if;
+
   -- no row may be left in an indeterminate state
   select count(*) into v_bad
     from public.import_source_rows r
