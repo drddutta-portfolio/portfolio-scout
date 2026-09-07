@@ -268,6 +268,56 @@ application credential exists.
 
 Rollback: `begin; drop function if exists public.commit_import_batch(uuid); commit;`
 
+## Migration 08 — settings & derived holdings (`db/migrations/0008_derived_holdings.sql`)
+
+Applied and verified **2026-09-07 07:03 UTC** (12:33 IST) against the dedicated PortfolioAI Supabase project.
+
+Objects created (and nothing else): table `public.portfolio_security_settings` (8 columns, 2 indexes,
+`portfolio_security_settings_set_updated_at` reusing the shared `public.set_updated_at()`), and view
+`public.current_holdings` (`security_invoker = true`, owner `postgres`, never materialized).
+No new enum, function or sequence. Structural counts after apply: 11 public tables, 1 view,
+0 materialized views, 6 public functions, 15 enums — Migrations 01–07 objects unchanged.
+
+Settings semantics: current role only (`portfolio_role`, default `UNASSIGNED`); notes ≤ 4000 chars;
+unique `(owner_id, portfolio_id, security_id)`; three FKs all `ON DELETE RESTRICT`, including the
+owner-safe composite `(owner_id, portfolio_id) → portfolios(owner_id, id)`.
+
+Derivation semantics: `current_holdings` reads only `txn_state = 'ACTIVE'` transactions.
+`BUY`/`OPENING_POSITION`/`TRANSFER_IN`/`BONUS` add, `SELL`/`TRANSFER_OUT` subtract. Any ACTIVE
+`SPLIT`/`REVERSAL`/`ADJUSTMENT` forces `net_quantity = NULL` (disclosed via `unhandled_txn_count`);
+any supported row with NULL quantity forces `net_quantity = NULL` (via `missing_quantity_count`).
+NULL means INSUFFICIENT_DATA, never zero. Fully-resolved zero holdings are omitted by an outer
+`net_quantity is distinct from 0` filter over the derivation CTE; NULL and negative quantities remain
+visible. No cost basis, average price, accounting method, P&L, market value or portfolio weight.
+
+Deferred explicitly: role-change history (later audit/decision layer) and corporate-action modelling
+(later reviewed migration, subject to the no-double-counting invariant below).
+
+Privileges: `anon` has nothing on either object. `authenticated` on the settings table has SELECT,
+DELETE, INSERT on `(owner_id, portfolio_id, security_id, role, notes)` and UPDATE on `(role, notes)`
+only — no INSERT/UPDATE on `created_at`/`updated_at` or the identity keys. `authenticated` has SELECT
+on the view. `service_role` has `ALL` on the table (compatibility only; no service-role credential
+exists in the app). RLS enabled with exactly 4 owner-scoped policies (`pss_select_own`,
+`pss_insert_own`, `pss_update_own`, `pss_delete_own`, all `TO authenticated`, `owner_id = auth.uid()`).
+
+Behavioural verification: 42 checks executed inside a single transaction and rolled back; 41 passed
+and the one reported failure was a defect in the test's own `LIKE` pattern for `proconfig`, re-checked
+directly — `commit_import_batch` remains SECURITY DEFINER, owner `postgres`, `search_path=""`.
+Covered: full supported arithmetic (net 16, counts, first/last trade dates); each unsupported type
+(`SPLIT`, `REVERSAL`, `ADJUSTMENT`) forcing NULL; NULL-quantity invalidation; clean zero omitted;
+zero-with-unhandled still visible as NULL; negative `-5` visible; non-ACTIVE rows excluded from every
+aggregate; settings insert/select/update/delete by owner; default role; duplicate, notes-length,
+cross-owner-portfolio, forged-`owner_id`, forged-timestamp and identity-key-update rejections;
+`set_updated_at` overriding a supplied value; cross-owner reads returning 0 rows and cross-owner
+update/delete affecting 0 rows; `anon` denied on both objects; and M01–M07 regression (transactions
+still SELECT-only for `authenticated` and not writable/deletable, all public FKs still RESTRICT, 28
+policies, `commit_import_batch` unchanged). Post-test residual counts are 0 for `transactions`,
+`portfolio_security_settings`, `securities`, `profiles`, `auth.users` and `current_holdings` — no
+portfolio data imported. Secret scan clean, `tsgo --noEmit` clean, production build succeeded.
+
+Rollback: `begin; drop view if exists public.current_holdings; drop table if exists public.portfolio_security_settings; commit;` (never `cascade`; never drop the shared `set_updated_at()`)
+
+
 ## Binding migration rule — explicit grants only
 
 From Migration 02a onward, `public` objects created by the migration role
