@@ -128,6 +128,10 @@ create table public.import_source_rows (
     foreign key (owner_id, candidate_broker_account_id)
     references public.broker_accounts (owner_id, id) on delete restrict,
   constraint import_source_rows_owner_id_id_key unique (owner_id, id),
+  -- Owner-safe self reference; deliberately NOT restricted to the same batch.
+  constraint import_source_rows_duplicate_owner_fk
+    foreign key (owner_id, duplicate_of_row_id)
+    references public.import_source_rows (owner_id, id) on delete restrict,
   constraint import_source_rows_batch_ordinal_key unique (import_batch_id, source_row_number),
   constraint import_source_rows_ordinal_positive check (source_row_number >= 1),
   constraint import_source_rows_qty_nonneg check (candidate_quantity is null or candidate_quantity > 0),
