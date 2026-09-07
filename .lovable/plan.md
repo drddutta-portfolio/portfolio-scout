@@ -1,434 +1,512 @@
-# Migration 06 — Import staging and provenance (PROPOSAL ONLY)
+# Migration 07 — Trusted Import Commit (PROPOSAL ONLY, NOT APPLIED)
 
-Not applied. No migration file created. No remote schema change. Migration 05 untouched. No canonical transactions inserted. No UI work. No secrets or service-role credential.
+Status: proposal for review. No migration file created, no Supabase change, no
+transactions inserted, no UI, no service-role credential.
 
-Proposed filename: `db/migrations/0006_import_staging.sql`
+## 1. Filename
 
-## 1. Model summary
+`db/migrations/0007_commit_import_batch.sql`
 
-Two new tables plus two new enums, and one additive lineage column on `transactions`.
+Contents: exactly one function (`public.commit_import_batch`), its
+REVOKE/GRANT block, and comments. No new tables, columns, enums, policies or
+grants on tables. Existing RLS, grants and M05/M06 guards are untouched.
 
-- `import_batches` — one upload attempt, owned by one user, targeting one portfolio.
-- `import_source_rows` — immutable raw evidence + mutable interpretation for each source row.
-- `transactions.import_source_row_id` — nullable lineage. **Batch is NOT duplicated on transactions**: it is derivable through the source row, and a second column would be redundant state that could drift. Recommendation: source-row lineage only.
+## 2. RPC signature
 
-New enums (existing 13 unchanged):
+```
+public.commit_import_batch(p_batch_id uuid)
+returns table (
+  batch_id uuid,
+  status public.import_batch_state,
+  committed_transaction_count integer,
+  excluded_row_count integer,
+  already_committed boolean
+)
+```
 
-- `import_row_resolution`: `UNRESOLVED`, `RESOLVED`, `EXCLUDED`, `COMMITTED`. Staging workflow state, deliberately separate from `data_quality_state` — one is "can this row be committed yet", the other is "is the data itself complete". Overloading them would make both ambiguous.
-- `security_resolution_state`: `UNRESOLVED`, `RESOLVED`, `AMBIGUOUS`, `UNSUPPORTED`. Lets validation and UI distinguish the four cases without fuzzy matching in the database.
+One argument. Everything else is loaded server-side from
+`import_batches` / `import_source_rows`. Owner comes from `auth.uid()`,
+portfolio from the batch, all economic facts from the staging row.
 
-`data_quality_state` and `data_quality_issue[]` are reused unchanged. `MISSING_BROKER` (unknown source institution) and `MISSING_ACCOUNT` (institution known, account not identified) stay distinct exactly as in Migration 05.
+`p_client_request_id` is deliberately NOT added: `import_batches` already
+carries `client_request_id` with a unique `(owner_id, client_request_id)`
+index, set at upload time, and the batch row lock plus
+`transactions_source_row_uidx` already make retries deterministic. A second
+idempotency token would add a code path with no additional guarantee.
 
-## 2. Field classification
+## 3. Owner and security model
 
-`import_batches` — required now: `id`, `owner_id`, `portfolio_id`, `state`, `original_filename`, `source_format`, `created_at`, `updated_at`. Useful now: `source_system`, `file_size_bytes`, `file_sha256`, `mime_type`, `client_request_id`, `total_source_rows`, `rows_valid`, `rows_incomplete`, `rows_needs_review`, `error_summary`, `committed_at`. Deferred: storage object path, per-column mapping profile, retry counters, UI wizard step.
+- `security definer`, `language plpgsql`, `set search_path = ''`, all objects
+  fully schema-qualified (`public.`, `auth.uid()`, `pg_catalog` operators).
+- Owner: **`postgres`** — the role that owns every object created by
+  Migrations 01–06 and the role used by the rolled-back M06 definer probe.
+  `service_role` is not used as owner; no service-role key exists in the app.
+- Because `postgres` owns the tables and they are not `FORCE ROW LEVEL
+  SECURITY`, the function's own statements bypass RLS. Every ownership check
+  is therefore written explicitly in the body, never assumed from RLS.
+- No dynamic SQL, no user-supplied identifiers, no `EXECUTE format(...)`.
+- Interaction with the M06 guard: `import_batches_guard_state()` rejects
+  `COMMITTING/COMMITTED/FAILED` only when `current_user = 'authenticated'`.
+  Inside a definer function owned by `postgres`, `current_user` is `postgres`
+  while `session_user`/`auth.uid()` still identify the caller — so the RPC may
+  perform the trusted transition and a direct browser UPDATE still cannot.
+  `import_source_rows_update_own` (an RLS policy) likewise does not apply to
+  the definer's statements, so the RPC can set `resolution = 'COMMITTED'`.
 
-`import_source_rows` — required now: `id`, `import_batch_id`, `owner_id`, `source_row_number`, `raw_payload jsonb`, `raw_line text`, resolution + data-quality columns, timestamps. Useful now: all `raw_*` strings and `candidate_*` parsed values listed below, `security_resolution`, `candidate_security_id`, `candidate_broker_account_id`, `duplicate_of_row_id`, `duplicate_reason`, `candidate_fingerprint`. Deferred: ranked candidate-match arrays, reviewer identity/notes, per-row commit error text (batch-level `error_summary` suffices in Phase 1).
+## 4. Batch state transitions
 
-## 3. Raw vs parsed
+Allowed entry state: **`AWAITING_CONFIRMATION` only**.
 
-Both, deliberately. `raw_payload jsonb not null` holds the full parsed-but-untyped source record (header key → cell text). `raw_line text` holds the original delimited line when the format has one. In addition, the specific fields validation depends on are kept as explicit `raw_*` text columns so constraints and indexes can reference them. No whole-file payload and no binary is stored per row; the uploaded file itself stays outside the row (fingerprinted by `file_sha256`).
+`AWAITING_CONFIRMATION → COMMITTING → COMMITTED` inside one call.
 
-Parsing failures: the `raw_*` text is preserved verbatim and the paired `candidate_*` column stays `NULL`, never `0`. `raw_date = 'N/A'` → `candidate_trade_date IS NULL` plus `MISSING_DATE`; `raw_quantity = '1,250'` → `candidate_quantity = 1250`. All parsed financial and quantity values are `numeric(38,18)`; no floating point anywhere.
+- `COMMITTED` → returns the idempotent success result, inserts nothing.
+- `COMMITTING` → error `batch is being committed` (a live concurrent call
+  holds the lock; a crashed call rolled its transition back, so a persisted
+  `COMMITTING` means a genuine anomaly requiring review). No crash-recovery
+  machinery is added.
+- Any other state → error `batch is not awaiting confirmation`.
 
-## 4. Exact SQL for review
+The intermediate `COMMITTING` write exists so that the state is observable to
+`FOR UPDATE`-blocked callers after commit and so the value is not invented
+later; because the whole function is one transaction, an exception rolls it
+back with everything else.
+
+## 5. Eligible rows
+
+Strict rule: `resolution = 'RESOLVED' AND data_quality_state = 'VALID' AND
+cardinality(data_quality_issues) = 0`.
+
+Semantics option **B**: `EXCLUDED` rows are permitted and ignored; anything
+else that is not eligible aborts the whole commit. Concretely, the commit
+fails if any row in the batch has `resolution IN ('UNRESOLVED')`, or
+`resolution = 'RESOLVED'` with `data_quality_state <> 'VALID'`. Nothing enters
+the ledger merely because candidate fields are non-null.
+
+Pre-existing `resolution = 'COMMITTED'` rows in an
+`AWAITING_CONFIRMATION` batch are an inconsistent-lineage error.
+
+## 6. Excluded rows
+
+Preserved exactly as-is: never inserted, never deleted, never re-stated,
+remain `EXCLUDED` after commit and stay distinguishable from `COMMITTED`.
+They are counted in the return value only.
+
+## 7. Server-side revalidation (per eligible row, before any insert)
+
+- row `owner_id = auth.uid()` and `import_batch_id = p_batch_id`;
+- `security_resolution = 'RESOLVED'` and `candidate_security_id` present and
+  exists in `public.securities`;
+- `candidate_broker_account_id` present and the account row exists with
+  `owner_id = auth.uid()`;
+- `candidate_txn_type` present; `candidate_trade_date` present;
+- `candidate_quantity` present and `> 0`;
+- `candidate_unit_price / gross_amount / total_charges` are NULL or `>= 0`;
+- `candidate_currency` present and matches `^[A-Z]{3}$` (see §9);
+- `data_quality_state = 'VALID'` and `data_quality_issues = '{}'`;
+- `candidate_txn_type NOT IN ('SPLIT','REVERSAL','ADJUSTMENT')` — M05 requires
+  those to be `NEEDS_REVIEW`, which is not committable; they are rejected with
+  an explicit "type not yet interpretable" error rather than being bent;
+- no existing `public.transactions` row already carries this
+  `import_source_row_id`.
+
+## 8. Mapping (staging → ledger)
+
+| transactions column | source |
+|---|---|
+| owner_id | `auth.uid()` (= batch owner, verified) |
+| portfolio_id | `import_batches.portfolio_id` |
+| broker_account_id | `candidate_broker_account_id` |
+| security_id | `candidate_security_id` |
+| txn_type | `candidate_txn_type` |
+| trade_date | `candidate_trade_date` |
+| quantity | `candidate_quantity` |
+| unit_price | `candidate_unit_price` (may stay NULL) |
+| gross_amount | `candidate_gross_amount` (never derived) |
+| total_charges | `candidate_total_charges` (may stay NULL) |
+| currency | `candidate_currency` (explicit, never defaulted) |
+| txn_state | `'ACTIVE'` |
+| data_quality_state | `'VALID'` |
+| data_quality_issues | `'{}'` |
+| source_system | `import_batches.source_system` |
+| source_reference | `raw_source_reference` |
+| import_source_row_id | source row `id` |
+| notes | NULL |
+
+No absent fact is fabricated; no arithmetic is performed.
+
+## 9. Currency rule
+
+A row with `candidate_currency IS NULL` is **rejected**. The column default
+`'INR'` on `transactions` must never be reached through this path; the insert
+lists `currency` explicitly. Establishing a documented per-source default
+belongs to the staging/normalisation step before `AWAITING_CONFIRMATION`, not
+to the trusted commit.
+
+## 10. Idempotency
+
+- Batch already `COMMITTED`: return
+  `(batch_id, 'COMMITTED', <count of transactions with lineage into this
+  batch>, <excluded count>, already_committed = true)` — no writes.
+- Before inserting, the RPC checks for an existing transaction per source row
+  (`NOT EXISTS` on `import_source_row_id`). A hit inside a batch that is not
+  yet `COMMITTED` is inconsistent lineage → abort with a clear error, never a
+  silent second insert. `transactions_source_row_uidx` remains the last-resort
+  backstop, not the primary mechanism.
+- Retry after a failed attempt: nothing persisted, so retry is clean.
+
+## 11. Concurrency
+
+`SELECT ... FROM public.import_batches WHERE id = p_batch_id FOR UPDATE` is
+the first data statement after the auth check. A second concurrent call blocks
+there; when the first commits, the second re-reads state `COMMITTED` and takes
+the idempotent path. Browser row edits are blocked because
+`import_source_rows_update_own` requires the parent batch state to be one of
+`UPLOADED/PREVIEWED/VALIDATED/AWAITING_CONFIRMATION`, and the batch is
+`COMMITTING` (then `COMMITTED`) for the whole critical section; the batch row
+lock also serialises any concurrent browser UPDATE of the batch itself.
+
+## 12. Atomicity
+
+A PostgreSQL function runs inside the caller's transaction; PostgREST runs one
+statement per request. Any `raise exception` (or constraint violation) rolls
+back every insert, every `resolution` change and the state transition — the
+batch reverts to `AWAITING_CONFIRMATION`. There is no per-row commit, no
+exception swallowing, and no autonomous transaction.
+
+## 13. Batch counters
+
+Authorization never reads `rows_valid / rows_incomplete / rows_needs_review /
+total_source_rows`. Eligibility is recomputed with aggregates over
+`import_source_rows`. On success the RPC refreshes the stored counters from
+those recomputed values (and `total_source_rows` from the actual row count) so
+the persisted record matches what was committed.
+
+## 14. Source-row finalization
+
+Exactly the rows that produced a transaction go `RESOLVED → COMMITTED`, in the
+same statement set as the inserts. `EXCLUDED` stays `EXCLUDED`. No other row
+is touched. The M06 committed-interpretation freeze then applies to those rows
+from that moment on.
+
+## 15. Error model
+
+`raise exception` with stable, non-leaking messages and errcodes:
+
+| condition | errcode | message |
+|---|---|---|
+| `auth.uid()` NULL | 28000 | `commit_import_batch: authentication required` |
+| batch missing / not owned | 42501 | `commit_import_batch: batch not found` (no existence oracle) |
+| wrong state | 22023 | `commit_import_batch: batch is not awaiting confirmation` |
+| state `COMMITTING` | 55006 | `commit_import_batch: batch commit already in progress` |
+| unresolved rows present | 22023 | `... N row(s) are unresolved` |
+| incomplete / needs-review rows | 22023 | `... N row(s) are not valid for commit` |
+| missing account/security/date/quantity/currency | 22023 | `... row N: <field> is required` |
+| uninterpretable type | 22023 | `... row N: SPLIT/REVERSAL/ADJUSTMENT is not yet committable` |
+| existing lineage | 40002 | `... row N already has a canonical transaction` |
+| empty commit set | 22023 | `... no committable rows` |
+
+No raw payloads, no identifiers of other users, no internal SQL text.
+
+## 16. Return schema
+
+Single row: `batch_id uuid`, `status public.import_batch_state`,
+`committed_transaction_count integer`, `excluded_row_count integer`,
+`already_committed boolean`. No payload echo.
+
+## 17. Empty batch
+
+Recommended and proposed: **reject**. Zero source rows, all rows `EXCLUDED`,
+or zero eligible rows all raise `no committable rows`; the batch stays
+`AWAITING_CONFIRMATION`. An economically empty batch is never marked
+`COMMITTED` implicitly. If you later want an explicit "close as empty" path,
+that is a separate reviewed operation.
+
+## 18. Grants
 
 ```sql
--- 0006_import_staging.sql — untrusted import staging + provenance.
+revoke all on function public.commit_import_batch(uuid) from public;
+revoke all on function public.commit_import_batch(uuid) from anon;
+grant execute on function public.commit_import_batch(uuid) to authenticated;
+```
+
+No table grants change; `authenticated` still has no INSERT/UPDATE/DELETE on
+`public.transactions`.
+
+## 19. Exact SQL (for review)
+
+```sql
 begin;
 
-create type public.import_row_resolution as enum
-  ('UNRESOLVED','RESOLVED','EXCLUDED','COMMITTED');
-create type public.security_resolution_state as enum
-  ('UNRESOLVED','RESOLVED','AMBIGUOUS','UNSUPPORTED');
-
-create table public.import_batches (
-  id                 uuid primary key default gen_random_uuid(),
-  owner_id           uuid not null references public.profiles(id) on delete restrict,
-  portfolio_id       uuid not null,
-  state              public.import_batch_state not null default 'UPLOADED',
-  original_filename  text not null,
-  source_format      text not null,
-  source_system      text,
-  mime_type          text,
-  file_size_bytes    bigint,
-  file_sha256        char(64),
-  client_request_id  uuid,
-  total_source_rows  integer,
-  rows_valid         integer not null default 0,
-  rows_incomplete    integer not null default 0,
-  rows_needs_review  integer not null default 0,
-  error_summary      text,
-  committed_at       timestamptz,
-  created_at         timestamptz not null default now(),
-  updated_at         timestamptz not null default now(),
-  constraint import_batches_portfolio_owner_fk
-    foreign key (owner_id, portfolio_id)
-    references public.portfolios (owner_id, id) on delete restrict,
-  constraint import_batches_owner_id_id_key unique (owner_id, id),
-  constraint import_batches_filename_len check (char_length(original_filename) between 1 and 260),
-  constraint import_batches_format_ck check (source_format in ('CSV','XLSX','XLS','JSON','MANUAL','OTHER')),
-  constraint import_batches_sha_format check (file_sha256 is null or file_sha256 ~ '^[0-9a-f]{64}$'),
-  constraint import_batches_size_nonneg check (file_size_bytes is null or file_size_bytes >= 0),
-  constraint import_batches_counts_nonneg check (
-    coalesce(total_source_rows,0) >= 0 and rows_valid >= 0
-    and rows_incomplete >= 0 and rows_needs_review >= 0),
-  constraint import_batches_committed_at_state check (
-    (committed_at is null) = (state <> 'COMMITTED'))
-);
-
-create unique index import_batches_client_request_uidx
-  on public.import_batches (owner_id, client_request_id) where client_request_id is not null;
-create index import_batches_owner_idx on public.import_batches (owner_id);
-create index import_batches_portfolio_idx on public.import_batches (portfolio_id);
-create index import_batches_sha_idx on public.import_batches (owner_id, file_sha256) where file_sha256 is not null;
-
-create table public.import_source_rows (
-  id                        uuid primary key default gen_random_uuid(),
-  import_batch_id           uuid not null,
-  owner_id                  uuid not null references public.profiles(id) on delete restrict,
-  source_row_number         integer not null,
-  raw_payload               jsonb not null,
-  raw_line                  text,
-  raw_security_text         text,
-  raw_exchange              text,
-  raw_isin                  text,
-  raw_broker_text           text,
-  raw_account_text          text,
-  raw_txn_type              text,
-  raw_date                  text,
-  raw_quantity              text,
-  raw_unit_price            text,
-  raw_gross_amount          text,
-  raw_total_charges         text,
-  raw_currency              text,
-  raw_source_reference      text,
-  candidate_security_id     uuid references public.securities(id) on delete restrict,
-  candidate_broker_account_id uuid,
-  candidate_txn_type        public.txn_type,
-  candidate_trade_date      date,
-  candidate_quantity        numeric(38,18),
-  candidate_unit_price      numeric(38,18),
-  candidate_gross_amount    numeric(38,18),
-  candidate_total_charges   numeric(38,18),
-  candidate_currency        char(3),
-  candidate_fingerprint     text,
-  security_resolution       public.security_resolution_state not null default 'UNRESOLVED',
-  resolution                public.import_row_resolution not null default 'UNRESOLVED',
-  data_quality_state        public.data_quality_state not null default 'INCOMPLETE',
-  data_quality_issues       public.data_quality_issue[] not null default '{}',
-  duplicate_of_row_id       uuid,
-  duplicate_reason          text,
-  created_at                timestamptz not null default now(),
-  updated_at                timestamptz not null default now(),
-  constraint import_source_rows_batch_owner_fk
-    foreign key (owner_id, import_batch_id)
-    references public.import_batches (owner_id, id) on delete restrict,
-  constraint import_source_rows_account_owner_fk
-    foreign key (owner_id, candidate_broker_account_id)
-    references public.broker_accounts (owner_id, id) on delete restrict,
-  constraint import_source_rows_owner_id_id_key unique (owner_id, id),
-  -- Owner-safe self reference; deliberately NOT restricted to the same batch.
-  constraint import_source_rows_duplicate_owner_fk
-    foreign key (owner_id, duplicate_of_row_id)
-    references public.import_source_rows (owner_id, id) on delete restrict,
-  constraint import_source_rows_batch_ordinal_key unique (import_batch_id, source_row_number),
-  constraint import_source_rows_ordinal_positive check (source_row_number >= 1),
-  constraint import_source_rows_qty_nonneg check (candidate_quantity is null or candidate_quantity > 0),
-  constraint import_source_rows_price_nonneg check (candidate_unit_price is null or candidate_unit_price >= 0),
-  constraint import_source_rows_gross_nonneg check (candidate_gross_amount is null or candidate_gross_amount >= 0),
-  constraint import_source_rows_charges_nonneg check (candidate_total_charges is null or candidate_total_charges >= 0),
-  constraint import_source_rows_currency_format check (candidate_currency is null or candidate_currency ~ '^[A-Z]{3}$'),
-  constraint import_source_rows_resolution_ck check (
-    resolution <> 'RESOLVED' or (
-      candidate_security_id is not null and security_resolution = 'RESOLVED'
-      and candidate_txn_type is not null and candidate_trade_date is not null
-      and candidate_quantity is not null)),
-  constraint import_source_rows_security_state_ck check (
-    (security_resolution = 'RESOLVED') = (candidate_security_id is not null)),
-  constraint import_source_rows_valid_no_issues check (
-    data_quality_state <> 'VALID' or cardinality(data_quality_issues) = 0),
-  -- An initial UNRESOLVED row may have no issue yet: validation has not run.
-  -- Once past UNRESOLVED, a non-VALID state must name at least one issue.
-  constraint import_source_rows_flagged_has_issue check (
-    resolution = 'UNRESOLVED'
-    or data_quality_state = 'VALID'
-    or cardinality(data_quality_issues) >= 1),
-  constraint import_source_rows_missing_account_disclosed check (
-    candidate_broker_account_id is not null
-    or 'MISSING_ACCOUNT' = any(data_quality_issues)
-    or resolution = 'UNRESOLVED'),
-  constraint import_source_rows_dup_not_self check (duplicate_of_row_id is distinct from id)
-);
-
-create index import_source_rows_batch_idx on public.import_source_rows (import_batch_id, source_row_number);
-create index import_source_rows_owner_idx on public.import_source_rows (owner_id);
-create index import_source_rows_security_idx on public.import_source_rows (candidate_security_id)
-  where candidate_security_id is not null;
-create index import_source_rows_fingerprint_idx on public.import_source_rows (owner_id, candidate_fingerprint)
-  where candidate_fingerprint is not null;
-
--- Lineage on the canonical ledger (nullable: manual trusted rows have none).
-alter table public.transactions
-  add column import_source_row_id uuid,
-  add constraint transactions_source_row_owner_fk
-    foreign key (owner_id, import_source_row_id)
-    references public.import_source_rows (owner_id, id) on delete restrict;
-
--- One canonical transaction per staging row: makes commit retry idempotent.
-create unique index transactions_source_row_uidx
-  on public.transactions (import_source_row_id) where import_source_row_id is not null;
-
--- Extend the Migration 05 guard to lineage (drop/recreate; behaviour otherwise identical).
-create or replace function public.transactions_guard_immutable_fields()
-returns trigger language plpgsql security invoker set search_path = '' as $$
+create function public.commit_import_batch(p_batch_id uuid)
+returns table (
+  batch_id uuid,
+  status public.import_batch_state,
+  committed_transaction_count integer,
+  excluded_row_count integer,
+  already_committed boolean
+)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_uid        uuid := auth.uid();
+  v_batch      public.import_batches%rowtype;
+  v_bad        integer;
+  v_row        public.import_source_rows%rowtype;
+  v_inserted   integer := 0;
+  v_excluded   integer := 0;
 begin
-  if new.owner_id is distinct from old.owner_id
-  or new.portfolio_id is distinct from old.portfolio_id
-  or new.broker_account_id is distinct from old.broker_account_id
-  or new.security_id is distinct from old.security_id
-  or new.txn_type is distinct from old.txn_type
-  or new.trade_date is distinct from old.trade_date
-  or new.quantity is distinct from old.quantity
-  or new.unit_price is distinct from old.unit_price
-  or new.gross_amount is distinct from old.gross_amount
-  or new.total_charges is distinct from old.total_charges
-  or new.currency is distinct from old.currency
-  or new.source_system is distinct from old.source_system
-  or new.source_reference is distinct from old.source_reference
-  or new.import_source_row_id is distinct from old.import_source_row_id
-  or new.created_at is distinct from old.created_at
-  then
-    raise exception
-      'transactions: economic/source/lineage fields are immutable; correct via a reversal or superseding ledger row'
-      using errcode = 'restrict_violation';
+  if v_uid is null then
+    raise exception 'commit_import_batch: authentication required'
+      using errcode = '28000';
   end if;
-  return new;
-end; $$;
-revoke execute on function public.transactions_guard_immutable_fields() from public;
-revoke execute on function public.transactions_guard_immutable_fields() from anon, authenticated;
 
--- Raw evidence is immutable; interpretation may change.
-create function public.import_source_rows_guard_raw()
-returns trigger language plpgsql security invoker set search_path = '' as $$
-begin
-  if new.id is distinct from old.id
-  or new.import_batch_id is distinct from old.import_batch_id
-  or new.owner_id is distinct from old.owner_id
-  or new.source_row_number is distinct from old.source_row_number
-  or new.raw_payload is distinct from old.raw_payload
-  or new.raw_line is distinct from old.raw_line
-  or new.raw_security_text is distinct from old.raw_security_text
-  or new.raw_exchange is distinct from old.raw_exchange
-  or new.raw_isin is distinct from old.raw_isin
-  or new.raw_broker_text is distinct from old.raw_broker_text
-  or new.raw_account_text is distinct from old.raw_account_text
-  or new.raw_txn_type is distinct from old.raw_txn_type
-  or new.raw_date is distinct from old.raw_date
-  or new.raw_quantity is distinct from old.raw_quantity
-  or new.raw_unit_price is distinct from old.raw_unit_price
-  or new.raw_gross_amount is distinct from old.raw_gross_amount
-  or new.raw_total_charges is distinct from old.raw_total_charges
-  or new.raw_currency is distinct from old.raw_currency
-  or new.raw_source_reference is distinct from old.raw_source_reference
-  or new.created_at is distinct from old.created_at
-  then
-    raise exception 'import_source_rows: raw source evidence is immutable'
-      using errcode = 'restrict_violation';
+  select * into v_batch
+    from public.import_batches b
+   where b.id = p_batch_id and b.owner_id = v_uid
+   for update;
+
+  if not found then
+    raise exception 'commit_import_batch: batch not found'
+      using errcode = '42501';
   end if;
-  -- After commit the interpretation that produced the canonical transaction is
-  -- audit evidence too: it freezes completely. RESOLVED -> COMMITTED still works.
-  if old.resolution = 'COMMITTED' then
-    if new.resolution          is distinct from old.resolution
-    or new.candidate_security_id       is distinct from old.candidate_security_id
-    or new.candidate_broker_account_id is distinct from old.candidate_broker_account_id
-    or new.candidate_txn_type          is distinct from old.candidate_txn_type
-    or new.candidate_trade_date        is distinct from old.candidate_trade_date
-    or new.candidate_quantity          is distinct from old.candidate_quantity
-    or new.candidate_unit_price        is distinct from old.candidate_unit_price
-    or new.candidate_gross_amount      is distinct from old.candidate_gross_amount
-    or new.candidate_total_charges     is distinct from old.candidate_total_charges
-    or new.candidate_currency          is distinct from old.candidate_currency
-    or new.candidate_fingerprint       is distinct from old.candidate_fingerprint
-    or new.security_resolution         is distinct from old.security_resolution
-    or new.data_quality_state          is distinct from old.data_quality_state
-    or new.data_quality_issues         is distinct from old.data_quality_issues
-    or new.duplicate_of_row_id         is distinct from old.duplicate_of_row_id
-    or new.duplicate_reason            is distinct from old.duplicate_reason
-    then
-      raise exception 'import_source_rows: a COMMITTED row''s interpretation is immutable'
-        using errcode = 'restrict_violation';
+
+  select count(*) into v_excluded
+    from public.import_source_rows r
+   where r.import_batch_id = v_batch.id and r.resolution = 'EXCLUDED';
+
+  if v_batch.state = 'COMMITTED' then
+    select count(*) into v_inserted
+      from public.transactions t
+      join public.import_source_rows r on r.id = t.import_source_row_id
+     where r.import_batch_id = v_batch.id;
+    return query select v_batch.id, v_batch.state, v_inserted, v_excluded, true;
+    return;
+  end if;
+
+  if v_batch.state = 'COMMITTING' then
+    raise exception 'commit_import_batch: batch commit already in progress'
+      using errcode = '55006';
+  end if;
+
+  if v_batch.state <> 'AWAITING_CONFIRMATION' then
+    raise exception 'commit_import_batch: batch is not awaiting confirmation'
+      using errcode = '22023';
+  end if;
+
+  -- portfolio ownership (defence in depth; the composite FK already binds it)
+  perform 1 from public.portfolios p
+   where p.id = v_batch.portfolio_id and p.owner_id = v_uid;
+  if not found then
+    raise exception 'commit_import_batch: batch not found' using errcode = '42501';
+  end if;
+
+  -- no row may be left in an indeterminate state
+  select count(*) into v_bad
+    from public.import_source_rows r
+   where r.import_batch_id = v_batch.id
+     and r.resolution = 'UNRESOLVED';
+  if v_bad > 0 then
+    raise exception 'commit_import_batch: % row(s) are unresolved', v_bad
+      using errcode = '22023';
+  end if;
+
+  select count(*) into v_bad
+    from public.import_source_rows r
+   where r.import_batch_id = v_batch.id
+     and r.resolution = 'RESOLVED'
+     and (r.data_quality_state <> 'VALID'
+          or pg_catalog.cardinality(r.data_quality_issues) > 0);
+  if v_bad > 0 then
+    raise exception 'commit_import_batch: % row(s) are not valid for commit', v_bad
+      using errcode = '22023';
+  end if;
+
+  select count(*) into v_bad
+    from public.import_source_rows r
+   where r.import_batch_id = v_batch.id
+     and r.resolution = 'COMMITTED';
+  if v_bad > 0 then
+    raise exception 'commit_import_batch: inconsistent lineage in batch'
+      using errcode = '40002';
+  end if;
+
+  update public.import_batches
+     set state = 'COMMITTING'
+   where id = v_batch.id;
+
+  for v_row in
+    select * from public.import_source_rows r
+     where r.import_batch_id = v_batch.id
+       and r.owner_id = v_uid
+       and r.resolution = 'RESOLVED'
+       and r.data_quality_state = 'VALID'
+     order by r.source_row_number
+     for update
+  loop
+    if v_row.security_resolution <> 'RESOLVED' or v_row.candidate_security_id is null then
+      raise exception 'commit_import_batch: row %: security is required', v_row.source_row_number
+        using errcode = '22023';
     end if;
+    perform 1 from public.securities s where s.id = v_row.candidate_security_id;
+    if not found then
+      raise exception 'commit_import_batch: row %: security is required', v_row.source_row_number
+        using errcode = '22023';
+    end if;
+    if v_row.candidate_broker_account_id is null then
+      raise exception 'commit_import_batch: row %: broker account is required', v_row.source_row_number
+        using errcode = '22023';
+    end if;
+    perform 1 from public.broker_accounts a
+      where a.id = v_row.candidate_broker_account_id and a.owner_id = v_uid;
+    if not found then
+      raise exception 'commit_import_batch: row %: broker account is required', v_row.source_row_number
+        using errcode = '22023';
+    end if;
+    if v_row.candidate_txn_type is null then
+      raise exception 'commit_import_batch: row %: transaction type is required', v_row.source_row_number
+        using errcode = '22023';
+    end if;
+    if v_row.candidate_txn_type in ('SPLIT','REVERSAL','ADJUSTMENT') then
+      raise exception 'commit_import_batch: row %: % is not yet committable',
+        v_row.source_row_number, v_row.candidate_txn_type using errcode = '22023';
+    end if;
+    if v_row.candidate_trade_date is null then
+      raise exception 'commit_import_batch: row %: trade date is required', v_row.source_row_number
+        using errcode = '22023';
+    end if;
+    if v_row.candidate_quantity is null or v_row.candidate_quantity <= 0 then
+      raise exception 'commit_import_batch: row %: quantity is required', v_row.source_row_number
+        using errcode = '22023';
+    end if;
+    if v_row.candidate_currency is null then
+      raise exception 'commit_import_batch: row %: currency is required', v_row.source_row_number
+        using errcode = '22023';
+    end if;
+    if coalesce(v_row.candidate_unit_price, 0) < 0
+       or coalesce(v_row.candidate_gross_amount, 0) < 0
+       or coalesce(v_row.candidate_total_charges, 0) < 0 then
+      raise exception 'commit_import_batch: row %: negative amount', v_row.source_row_number
+        using errcode = '22023';
+    end if;
+    perform 1 from public.transactions t where t.import_source_row_id = v_row.id;
+    if found then
+      raise exception 'commit_import_batch: row % already has a canonical transaction',
+        v_row.source_row_number using errcode = '40002';
+    end if;
+
+    insert into public.transactions (
+      owner_id, portfolio_id, broker_account_id, security_id, txn_type,
+      trade_date, quantity, unit_price, gross_amount, total_charges, currency,
+      txn_state, data_quality_state, data_quality_issues,
+      source_system, source_reference, import_source_row_id)
+    values (
+      v_uid, v_batch.portfolio_id, v_row.candidate_broker_account_id,
+      v_row.candidate_security_id, v_row.candidate_txn_type,
+      v_row.candidate_trade_date, v_row.candidate_quantity,
+      v_row.candidate_unit_price, v_row.candidate_gross_amount,
+      v_row.candidate_total_charges, v_row.candidate_currency,
+      'ACTIVE', 'VALID', '{}',
+      v_batch.source_system, v_row.raw_source_reference, v_row.id);
+
+    update public.import_source_rows
+       set resolution = 'COMMITTED'
+     where id = v_row.id;
+
+    v_inserted := v_inserted + 1;
+  end loop;
+
+  if v_inserted = 0 then
+    raise exception 'commit_import_batch: no committable rows' using errcode = '22023';
   end if;
-  return new;
-end; $$;
 
--- Trusted-only lifecycle states and immutable committed batches.
-create function public.import_batches_guard_state()
-returns trigger language plpgsql security invoker set search_path = '' as $$
-begin
-  if new.owner_id is distinct from old.owner_id
-  or new.portfolio_id is distinct from old.portfolio_id
-  or new.original_filename is distinct from old.original_filename
-  or new.file_sha256 is distinct from old.file_sha256
-  or new.created_at is distinct from old.created_at then
-    raise exception 'import_batches: provenance fields are immutable'
-      using errcode = 'restrict_violation';
-  end if;
-  if old.state = 'COMMITTED' and new.state is distinct from old.state then
-    raise exception 'import_batches: COMMITTED is terminal'
-      using errcode = 'restrict_violation';
-  end if;
-  -- Effective execution identity, not the session role: a SECURITY DEFINER RPC
-  -- owned by a privileged role switches current_user away from 'authenticated'
-  -- even though the session role stays 'authenticated'.
-  if current_user::text = 'authenticated'
-     and new.state is distinct from old.state
-     and new.state in ('COMMITTING','COMMITTED','FAILED') then
-    raise exception 'import_batches: % is set only by the trusted server path', new.state
-      using errcode = 'insufficient_privilege';
-  end if;
-  return new;
-end; $$;
+  update public.import_batches b
+     set state = 'COMMITTED',
+         committed_at = pg_catalog.now(),
+         total_source_rows = s.total,
+         rows_valid        = s.valid,
+         rows_incomplete   = s.incomplete,
+         rows_needs_review = s.review
+    from (
+      select count(*)::int as total,
+             count(*) filter (where data_quality_state = 'VALID')::int as valid,
+             count(*) filter (where data_quality_state = 'INCOMPLETE')::int as incomplete,
+             count(*) filter (where data_quality_state = 'NEEDS_REVIEW')::int as review
+        from public.import_source_rows where import_batch_id = v_batch.id
+    ) s
+   where b.id = v_batch.id;
 
-revoke execute on function public.import_source_rows_guard_raw() from public, anon, authenticated;
-revoke execute on function public.import_batches_guard_state() from public, anon, authenticated;
+  return query select v_batch.id, 'COMMITTED'::public.import_batch_state,
+                      v_inserted, v_excluded, false;
+end;
+$$;
 
-create trigger import_batches_protect_state before update on public.import_batches
-  for each row execute function public.import_batches_guard_state();
-create trigger import_batches_set_updated_at before update on public.import_batches
-  for each row execute function public.set_updated_at();
-create trigger import_source_rows_protect_raw before update on public.import_source_rows
-  for each row execute function public.import_source_rows_guard_raw();
-create trigger import_source_rows_set_updated_at before update on public.import_source_rows
-  for each row execute function public.set_updated_at();
+alter function public.commit_import_batch(uuid) owner to postgres;
 
--- Explicit grants only (Migration 02a model). anon: nothing.
-grant select, delete on public.import_batches to authenticated;
-grant insert (owner_id, portfolio_id, original_filename, source_format, source_system,
-  mime_type, file_size_bytes, file_sha256, client_request_id, total_source_rows)
-  on public.import_batches to authenticated;
-grant update (state, source_system, total_source_rows, rows_valid, rows_incomplete,
-  rows_needs_review, error_summary) on public.import_batches to authenticated;
-grant all on public.import_batches to service_role;
+comment on function public.commit_import_batch(uuid) is
+  'Trusted atomic import commit: AWAITING_CONFIRMATION -> COMMITTING -> COMMITTED. '
+  'Loads all canonical facts server-side; the browser supplies only the batch id.';
 
-grant select, delete on public.import_source_rows to authenticated;
-grant insert (import_batch_id, owner_id, source_row_number, raw_payload, raw_line,
-  raw_security_text, raw_exchange, raw_isin, raw_broker_text, raw_account_text,
-  raw_txn_type, raw_date, raw_quantity, raw_unit_price, raw_gross_amount,
-  raw_total_charges, raw_currency, raw_source_reference)
-  on public.import_source_rows to authenticated;
-grant update (candidate_security_id, candidate_broker_account_id, candidate_txn_type,
-  candidate_trade_date, candidate_quantity, candidate_unit_price, candidate_gross_amount,
-  candidate_total_charges, candidate_currency, candidate_fingerprint, security_resolution,
-  resolution, data_quality_state, data_quality_issues, duplicate_of_row_id, duplicate_reason)
-  on public.import_source_rows to authenticated;
-grant all on public.import_source_rows to service_role;
-
-alter table public.import_batches enable row level security;
-alter table public.import_source_rows enable row level security;
-
-create policy import_batches_select_own on public.import_batches
-  for select to authenticated using (owner_id = auth.uid());
-create policy import_batches_insert_own on public.import_batches
-  for insert to authenticated with check (owner_id = auth.uid() and state = 'UPLOADED');
-create policy import_batches_update_own on public.import_batches
-  for update to authenticated using (owner_id = auth.uid() and state <> 'COMMITTED')
-  with check (owner_id = auth.uid()
-    and state in ('UPLOADED','PREVIEWED','VALIDATED','AWAITING_CONFIRMATION','REJECTED'));
-create policy import_batches_delete_own on public.import_batches
-  for delete to authenticated
-  using (owner_id = auth.uid() and state in ('UPLOADED','PREVIEWED','VALIDATED','REJECTED','FAILED'));
-
-create policy import_source_rows_select_own on public.import_source_rows
-  for select to authenticated using (owner_id = auth.uid());
-create policy import_source_rows_insert_own on public.import_source_rows
-  for insert to authenticated with check (owner_id = auth.uid()
-    and exists (select 1 from public.import_batches b
-                where b.id = import_batch_id and b.owner_id = auth.uid()
-                  and b.state in ('UPLOADED','PREVIEWED')));
--- Row editing also requires an editable PARENT BATCH: never while the trusted
--- commit path is reading the batch (COMMITTING) or after it finished (COMMITTED).
-create policy import_source_rows_update_own on public.import_source_rows
-  for update to authenticated
-  using (owner_id = auth.uid() and resolution <> 'COMMITTED'
-    and exists (select 1 from public.import_batches b
-                where b.id = import_batch_id and b.owner_id = auth.uid()
-                  and b.state in ('UPLOADED','PREVIEWED','VALIDATED','AWAITING_CONFIRMATION')))
-  with check (owner_id = auth.uid() and resolution in ('UNRESOLVED','RESOLVED','EXCLUDED')
-    and exists (select 1 from public.import_batches b
-                where b.id = import_batch_id and b.owner_id = auth.uid()
-                  and b.state in ('UPLOADED','PREVIEWED','VALIDATED','AWAITING_CONFIRMATION')));
-create policy import_source_rows_delete_own on public.import_source_rows
-  for delete to authenticated
-  using (owner_id = auth.uid() and resolution <> 'COMMITTED'
-    and exists (select 1 from public.import_batches b
-                where b.id = import_batch_id and b.owner_id = auth.uid()
-                  and b.state in ('UPLOADED','PREVIEWED','VALIDATED','REJECTED','FAILED')));
+revoke all on function public.commit_import_batch(uuid) from public;
+revoke all on function public.commit_import_batch(uuid) from anon;
+grant execute on function public.commit_import_batch(uuid) to authenticated;
 
 commit;
 ```
 
-## 5. Ownership, deletion and retention
-
-Every cross-table reference is a composite `(owner_id, …)` FK, so cross-owner mixing is impossible at the schema level, not merely by RLS: batch→portfolio, row→batch, row→broker_account, transaction→source row. `candidate_security_id` references the shared `securities` table (no owner dimension). All FKs are `ON DELETE RESTRICT` — nothing cascades.
-
-Deletion: the owner may delete their own rows and a batch only before commit, and `RESTRICT` makes it physically impossible to delete a source row or batch once a canonical transaction references it. Because row→batch is `RESTRICT`, discarding a batch means deleting its rows first (a later trusted RPC can do this in one call). `COMMITTED` batches and `COMMITTED` rows are permanently non-deletable and non-editable.
-
-## 6. Duplicate detection and idempotency
-
-No hard uniqueness on economic content — legitimate identical trades must be allowed. Enforced uniqueness is only where semantics are guaranteed: `(import_batch_id, source_row_number)`, `(owner_id, client_request_id)`, and one transaction per source row. Everything else is advisory: `file_sha256` gives a same-file-uploaded-twice warning (never proof of economic identity), `candidate_fingerprint` (normalised account+security+type+date+quantity+price hash, computed by the app) gives a duplicate-candidate warning, and `duplicate_of_row_id` + `duplicate_reason` + `DUPLICATE_SUSPECTED` record the finding without discarding the row. Cases A–E map to: A ordinal uniqueness (hard), B file hash (warning), C allowed by design, D source-reference comparison within owner+account (warning), E fingerprint (warning).
-
-`source_row_number` is the physical row number in the uploaded file including any header row, so an auditor can open the file and jump straight to it; the header itself is never staged as a data row.
-
-Batch idempotency for the future `commit_import_batch`: `(owner_id, client_request_id)` deduplicates the request; `transactions_source_row_uidx` makes a re-run insert-or-skip per row; `COMMITTING`/`COMMITTED` are trusted-only and `COMMITTED` is terminal, so a retry after a crash resumes rather than duplicates. Migration 07 needs no further schema.
-
-## 7. Verification and test plan (run after approval and apply)
-
-Structural: exactly two new tables and two new enums, existing 13 enums and all prior tables unchanged, one new nullable column on `transactions`, all FKs `confdeltype='r'`, expected indexes/uniques, RLS on with the eight listed policies, `relacl` showing no `anon`, functions `prosecdef=false` with `search_path=''` and no `anon`/`authenticated` EXECUTE.
-
-Behavioural (all in rolled-back transactions): cross-owner batch/row/account/lineage inserts rejected; duplicate ordinal rejected; two legitimate identical rows accepted; raw-field UPDATE rejected while candidate UPDATE succeeds and advances `updated_at`; `authenticated` cannot set `COMMITTING`/`COMMITTED`/`FAILED`, cannot re-open a `COMMITTED` batch or row, cannot delete a committed batch/row, cannot INSERT/UPDATE/DELETE `transactions`; `anon` denied everywhere; deleting a batch whose rows exist is blocked; deleting a source row referenced by a transaction is blocked; a second transaction on the same source row is rejected; all Migration 05 immutability checks still fail, now including `import_source_row_id`. Then secret scan, `tsgo --noEmit`, build, and documentation updates.
-
-Added tests for amendment 1: initial raw-row INSERT with grant-visible columns only succeeds (defaults `UNRESOLVED` / `INCOMPLETE` / `{}`); `UNRESOLVED` + `INCOMPLETE` + empty issues succeeds; `RESOLVED` + `INCOMPLETE` + empty issues fails; `RESOLVED` + `NEEDS_REVIEW` + empty issues fails; `VALID` + non-empty issues still fails.
-
-Added tests for amendment 2: same-owner cross-batch `duplicate_of_row_id` succeeds; cross-owner duplicate reference fails on `import_source_rows_duplicate_owner_fk`; self-reference fails on `import_source_rows_dup_not_self`; deleting a row referenced as a duplicate is blocked by RESTRICT.
-
-Added tests for amendment 3: as `authenticated`, `UPLOADED→PREVIEWED→VALIDATED→AWAITING_CONFIRMATION` and `→REJECTED` succeed, while `→COMMITTING`, `→COMMITTED` and `→FAILED` raise `insufficient_privilege`; the same transitions performed through a throwaway SECURITY DEFINER probe function owned by `postgres` (created and dropped inside the rolled-back test transaction only, never shipped) succeed, proving Migration 07 compatibility; `COMMITTED` remains terminal for every identity.
-
-Added tests for amendment 4: row UPDATE and DELETE by the owner succeed while the parent batch is `UPLOADED`/`PREVIEWED`/`VALIDATED`/`AWAITING_CONFIRMATION`, and affect zero rows once the batch is `COMMITTING` or `COMMITTED`; the trusted transition `RESOLVED → COMMITTED` succeeds; every later change to a `COMMITTED` row's candidate/resolution/duplicate/data-quality fields raises `import_source_rows: a COMMITTED row's interpretation is immutable`.
-
-## 8. The four amendments, in detail
-
-**1 — Initial insert is now possible without fabricating anything.** `import_source_rows_flagged_has_issue` is relaxed to `resolution = 'UNRESOLVED' OR data_quality_state = 'VALID' OR cardinality(data_quality_issues) >= 1`. A freshly staged row is `UNRESOLVED` with no issues because validation has not run — that is honest, not a claim of validity. `VALID ⇒ zero issues` is unchanged, and the moment a row leaves `UNRESOLVED` any non-`VALID` state must name at least one issue. Nothing is auto-marked `VALID` and no issue is invented.
-
-**2 — Duplicate references are owner-safe.** `duplicate_of_row_id` loses its plain FK and gains the composite self-FK `(owner_id, duplicate_of_row_id) → import_source_rows(owner_id, id) ON DELETE RESTRICT`, reusing `unique (owner_id, id)`. Same-owner cross-batch duplicate detection stays legal (that is the common real case: the same trade appearing in a later file); cross-owner references are impossible at schema level; self-reference stays blocked.
-
-**3 — Trusted-path detection is Migration 07 compatible.** The guard tests `current_user`, the effective execution identity, not the session role. A direct browser call executes with `current_user = 'authenticated'` and is refused `COMMITTING`/`COMMITTED`/`FAILED`. Migration 07's hardened narrow SECURITY DEFINER RPC will be owned by a privileged role, so inside it `current_user` becomes the function owner while the session role is still `authenticated` — the guard permits the transition, and the RPC itself remains responsible for validating `auth.uid()` ownership and re-running validation. No RPC is created here.
-
-**4 — Rows freeze with their parent batch.** Browser UPDATE and DELETE of `import_source_rows` now additionally require the parent batch to be in an editable state (`UPLOADED`, `PREVIEWED`, `VALIDATED`, `AWAITING_CONFIRMATION`; DELETE also allows `REJECTED`/`FAILED`), closing the race where interpretation changes while the trusted commit reads the batch. And once `resolution = 'COMMITTED'`, the guard freezes the whole interpretation — candidates, resolution, duplicate fields and data quality — not just the resolution value, because that interpretation is the audit trail for the canonical transaction it produced. The normal trusted `RESOLVED → COMMITTED` transition is unaffected.
-
-## 9. Rollback SQL
+## 20. Rollback
 
 ```sql
 begin;
-drop index if exists public.transactions_source_row_uidx;
-alter table public.transactions
-  drop constraint if exists transactions_source_row_owner_fk,
-  drop column if exists import_source_row_id;
--- Restore the Migration 05 guard body verbatim (without the lineage check).
--- \i db/migrations/0005_transactions.sql is NOT re-run; only the function is
--- recreated from its Migration 05 definition.
-drop table if exists public.import_source_rows;
-drop table if exists public.import_batches;
-drop function if exists public.import_source_rows_guard_raw();
-drop function if exists public.import_batches_guard_state();
-drop type if exists public.import_row_resolution;
-drop type if exists public.security_resolution_state;
+drop function if exists public.commit_import_batch(uuid);
 commit;
 ```
+Dropping the function does not affect already-committed ledger rows (correct:
+committed facts are never rewritten).
 
-Never `cascade`; never drop the shared `public.set_updated_at()`. Rollback is safe only while no canonical transaction carries lineage — if any does, the `RESTRICT` FK will block the drop, which is the intended protection.
+## 21. Structural verification plan
 
-## 10. Confirmations
+- exactly one new function; no new tables, columns, enums, policies;
+- `prosecdef = true`, `proconfig = {search_path=}`, owner `postgres`,
+  `provolatile = 'v'`, `prokind = 'f'`;
+- `has_function_privilege('anon', ..., 'execute') = false`,
+  `('authenticated', ...) = true`, PUBLIC revoked;
+- enum count still 15; M01–M06 tables, constraints, triggers, RLS policies and
+  column grants byte-identical to the pre-migration snapshot;
+- `authenticated` still has only SELECT on `public.transactions`.
 
-Migration 06 is **NOT APPLIED**. No migration file has been created, no remote schema was modified, Migration 05 remains untouched (its guard is only extended by this proposal, on approval), no canonical transactions were inserted, no UI work was done, no `commit_import_batch` RPC exists, and no service-role credential or secret was introduced anywhere.
+## 22. Behavioural test plan (all inside a rolled-back transaction)
+
+Unauthenticated reject; wrong-owner reject (`batch not found`); single-row
+commit; multi-row commit; batch with an explicit EXCLUDED row (commits the
+rest, EXCLUDED untouched); UNRESOLVED row present (whole batch fails);
+INCOMPLETE row; NEEDS_REVIEW row; missing account / security / date /
+quantity / currency each reject; SPLIT, REVERSAL, ADJUSTMENT each reject;
+pre-existing lineage rejects; retry of a COMMITTED batch returns
+`already_committed = true` with unchanged counts and no new rows;
+concurrency reasoning verified with two sessions (second blocks on
+`FOR UPDATE`, then takes the idempotent path); empty batch rejects;
+all-EXCLUDED batch rejects; one invalid row among many leaves zero
+transactions and the batch back at `AWAITING_CONFIRMATION`; field-by-field
+mapping assertions; `resolution = 'COMMITTED'` for exactly the inserted rows;
+batch `state = 'COMMITTED'`, `committed_at` non-null and consistent with the
+M06 constraint; refreshed counters match recomputed values; direct
+authenticated INSERT/UPDATE/DELETE on `public.transactions` still denied;
+direct authenticated UPDATE of batch state to COMMITTING/COMMITTED/FAILED
+still denied; committed source rows still frozen; final row/function counts
+show no residual test data.
+
+## 23. Compatibility with Migrations 01–06
+
+No schema object from M01–M06 is altered. The function relies on: M05
+constraints and immutability trigger, M06 `import_source_row_id` +
+`transactions_source_row_uidx`, the `current_user`-based batch state guard,
+the committed-row interpretation freeze, owner-safe composite FKs, and the
+explicit-grant model from M02a. Nothing is loosened.
+
+## Confirmations
+
+Migration 07 NOT applied · no migration file created · no Supabase schema
+modification · no portfolio transactions inserted · no service-role
+application credential · no UI work.
