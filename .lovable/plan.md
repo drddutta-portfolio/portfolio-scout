@@ -347,11 +347,24 @@ create policy import_source_rows_insert_own on public.import_source_rows
     and exists (select 1 from public.import_batches b
                 where b.id = import_batch_id and b.owner_id = auth.uid()
                   and b.state in ('UPLOADED','PREVIEWED')));
+-- Row editing also requires an editable PARENT BATCH: never while the trusted
+-- commit path is reading the batch (COMMITTING) or after it finished (COMMITTED).
 create policy import_source_rows_update_own on public.import_source_rows
-  for update to authenticated using (owner_id = auth.uid() and resolution <> 'COMMITTED')
-  with check (owner_id = auth.uid() and resolution in ('UNRESOLVED','RESOLVED','EXCLUDED'));
+  for update to authenticated
+  using (owner_id = auth.uid() and resolution <> 'COMMITTED'
+    and exists (select 1 from public.import_batches b
+                where b.id = import_batch_id and b.owner_id = auth.uid()
+                  and b.state in ('UPLOADED','PREVIEWED','VALIDATED','AWAITING_CONFIRMATION')))
+  with check (owner_id = auth.uid() and resolution in ('UNRESOLVED','RESOLVED','EXCLUDED')
+    and exists (select 1 from public.import_batches b
+                where b.id = import_batch_id and b.owner_id = auth.uid()
+                  and b.state in ('UPLOADED','PREVIEWED','VALIDATED','AWAITING_CONFIRMATION')));
 create policy import_source_rows_delete_own on public.import_source_rows
-  for delete to authenticated using (owner_id = auth.uid() and resolution <> 'COMMITTED');
+  for delete to authenticated
+  using (owner_id = auth.uid() and resolution <> 'COMMITTED'
+    and exists (select 1 from public.import_batches b
+                where b.id = import_batch_id and b.owner_id = auth.uid()
+                  and b.state in ('UPLOADED','PREVIEWED','VALIDATED','REJECTED','FAILED')));
 
 commit;
 ```
