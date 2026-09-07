@@ -213,6 +213,61 @@ All 83 behavioural checks passed inside transactions that were rolled back; post
 succeeded. No service-role application credential exists; the `service_role` GRANT is a database-role
 grant only.
 
+## Migration 07 — trusted import commit (`db/migrations/0007_commit_import_batch.sql`)
+
+Applied and verified **2026-09-07 04:43 UTC** (10:13 IST) against the dedicated PortfolioAI Supabase project.
+
+Created: exactly one database object — `public.commit_import_batch(p_batch_id uuid)` returning
+`(batch_id uuid, status public.import_batch_state, committed_transaction_count integer,
+excluded_row_count integer, already_committed boolean)`. No new tables, columns, enums, indexes,
+triggers or policies. Public function count 5 → 6; public tables still 10; public enums still 15.
+
+Security: `prosecdef=true`, owner `postgres`, `proconfig={search_path=""}`, `provolatile='v'`,
+no dynamic SQL, all references schema-qualified. `proacl = {postgres=X/postgres,
+authenticated=X/postgres}` — `PUBLIC` and `anon` cannot execute (`has_function_privilege` false for
+both, true for `authenticated`). `authenticated` still holds only `SELECT` on `public.transactions`.
+
+Identity / ownership: `auth.uid()` is the sole caller identity; the browser supplies only the batch id.
+Batch is loaded `FOR UPDATE` with `owner_id = auth.uid()`; portfolio ownership is revalidated; every
+source row of the batch is explicitly revalidated for `owner_id = auth.uid()` (aborting the whole commit
+on any mismatch, never filtering).
+
+Eligibility: `resolution='RESOLVED' AND data_quality_state='VALID' AND
+cardinality(data_quality_issues)=0`. EXCLUDED rows are skipped and preserved; UNRESOLVED, INCOMPLETE and
+NEEDS_REVIEW rows abort the entire commit. Empty and all-EXCLUDED batches are rejected
+(`no committable rows`). Only `AWAITING_CONFIRMATION → COMMITTING → COMMITTED` is permitted.
+
+Revalidation per row: security resolved + exists, broker account present + owned, txn type present and
+not SPLIT/REVERSAL/ADJUSTMENT, trade date present, quantity present and > 0, currency explicitly present
+(the table's INR default is never reached), non-negative amounts, and no pre-existing lineage.
+
+Behavioural verification: 31 checks, all passed, inside a transaction that was rolled back —
+unauthenticated (28000), wrong owner (`batch not found`, 42501), single-row commit with field-by-field
+mapping (owner/portfolio/account/security/type/date/quantity/unit price/currency/state/source system/
+source reference/lineage, `gross_amount` and `total_charges` preserved as NULL, nothing fabricated),
+source row RESOLVED→COMMITTED, batch COMMITTED with `committed_at` set and counters recomputed,
+idempotent retry (`already_committed=true`, no duplicate), multi-row commit skipping an EXCLUDED row,
+UNRESOLVED/INCOMPLETE/NEEDS_REVIEW/missing-account rejections with full rollback to
+AWAITING_CONFIRMATION, missing currency rejection, SPLIT/REVERSAL/ADJUSTMENT rejections, duplicate
+lineage rejection, empty and all-EXCLUDED batch rejection, wrong-state rejection, the M06 composite FK
+rejecting construction of a cross-owner source row (23503, FK not weakened), the M06 check rejecting a
+RESOLVED row without security/date/quantity (23514), `authenticated` still denied INSERT/UPDATE/DELETE on
+`public.transactions` (42501 each), `authenticated` still denied setting COMMITTING, and committed-row
+interpretation still frozen.
+
+Concurrency: the batch row lock (`SELECT ... FOR UPDATE`, the first data statement after the auth check)
+serialises callers; a second concurrent call blocks and then observes `COMMITTED` and takes the idempotent
+path. Two-session execution was not run because it would require persisting test ledger data; the lock,
+the state machine and the unique lineage index were verified in the deployed function source and by the
+idempotency and duplicate-lineage tests.
+
+Post-test row counts for `transactions`, `import_batches`, `import_source_rows`, `profiles`, `portfolios`,
+`broker_accounts`, `securities` and `auth.users` are all 0 — no residual test data, no portfolio data
+imported. Secret scan clean, `tsgo --noEmit` clean, production build succeeded. No service-role
+application credential exists.
+
+Rollback: `begin; drop function if exists public.commit_import_batch(uuid); commit;`
+
 ## Binding migration rule — explicit grants only
 
 From Migration 02a onward, `public` objects created by the migration role
