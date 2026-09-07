@@ -93,6 +93,12 @@ They are counted in the return value only.
 
 ## 7. Server-side revalidation (per eligible row, before any insert)
 
+- **explicit ownership revalidation:** after the batch is locked, count every
+  `import_source_rows` row of the batch with `owner_id <> auth.uid()`; any hit
+  aborts the whole commit with a stable non-leaking error. Such rows are never
+  merely filtered out of the loop. (The M06 composite FK makes this
+  unreachable under the current schema; the check is the explicit trust-
+  boundary promise of M07 regardless.);
 - row `owner_id = auth.uid()` and `import_batch_id = p_batch_id`;
 - `security_resolution = 'RESOLVED'` and `candidate_security_id` present and
   exists in `public.securities`;

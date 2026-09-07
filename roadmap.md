@@ -38,4 +38,6 @@
       no service-role credential in the application
 
 ## Next (awaiting approval)
-- [ ] Migration 07 (commit_import_batch trusted RPC) — NOT started
+- [ ] Migration 07 (commit_import_batch trusted RPC) — proposal revised with the two final
+      corrections (explicit per-row owner revalidation, exact empty-issues eligibility condition);
+      awaiting final approval. NOT applied, no migration file created
