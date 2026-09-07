@@ -47,5 +47,18 @@
       31/31 behavioural checks passed in rolled-back transactions, zero residual data,
       no service-role credential in the application
 
+- [x] Migration 08 (db/migrations/0008_derived_holdings.sql) — applied and verified 2026-09-07 07:03 UTC (12:33 IST):
+      public.portfolio_security_settings (current role only, notes<=4000, owner-safe composite unique,
+      3 RESTRICT FKs, shared set_updated_at trigger, narrow authenticated column grants, RLS with exactly
+      4 owner-scoped policies) and public.current_holdings (view, security_invoker=true, ACTIVE transactions
+      only, BUY/OPENING_POSITION/TRANSFER_IN/BONUS positive and SELL/TRANSFER_OUT negative, any ACTIVE
+      SPLIT/REVERSAL/ADJUSTMENT or NULL supported quantity forces net_quantity NULL, clean zero holdings
+      omitted, NULL and negative holdings visible, no cost basis/P&L/market value/weight/accounting method);
+      41 behavioural checks passed in a rolled-back transaction (the single reported failure was a defect in
+      the test's own LIKE pattern; commit_import_batch re-verified unchanged), zero residual data,
+      no service-role credential in the application.
+      Deferred: role-change history and corporate-action modelling.
+
 ## Next (awaiting approval)
-- [ ] Migration 08 (current_holdings / portfolio_security_settings / corporate_actions) — NOT started
+- [ ] Migration 09 (corporate_actions) — NOT started
+
