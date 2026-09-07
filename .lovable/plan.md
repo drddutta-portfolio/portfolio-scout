@@ -93,6 +93,12 @@ They are counted in the return value only.
 
 ## 7. Server-side revalidation (per eligible row, before any insert)
 
+- **explicit ownership revalidation:** after the batch is locked, count every
+  `import_source_rows` row of the batch with `owner_id <> auth.uid()`; any hit
+  aborts the whole commit with a stable non-leaking error. Such rows are never
+  merely filtered out of the loop. (The M06 composite FK makes this
+  unreachable under the current schema; the check is the explicit trust-
+  boundary promise of M07 regardless.);
 - row `owner_id = auth.uid()` and `import_batch_id = p_batch_id`;
 - `security_resolution = 'RESOLVED'` and `candidate_security_id` present and
   exists in `public.securities`;
@@ -302,6 +308,18 @@ begin
     raise exception 'commit_import_batch: batch not found' using errcode = '42501';
   end if;
 
+  -- explicit source-row ownership revalidation: the composite FK already makes
+  -- this impossible, but the trusted commit boundary verifies it explicitly and
+  -- never merely filters such rows out of the commit loop.
+  select count(*) into v_bad
+    from public.import_source_rows r
+   where r.import_batch_id = v_batch.id
+     and r.owner_id <> v_uid;
+  if v_bad > 0 then
+    raise exception 'commit_import_batch: inconsistent ownership in batch'
+      using errcode = '40002';
+  end if;
+
   -- no row may be left in an indeterminate state
   select count(*) into v_bad
     from public.import_source_rows r
@@ -342,6 +360,7 @@ begin
        and r.owner_id = v_uid
        and r.resolution = 'RESOLVED'
        and r.data_quality_state = 'VALID'
+       and pg_catalog.cardinality(r.data_quality_issues) = 0
      order by r.source_row_number
      for update
   loop
@@ -483,7 +502,17 @@ commit; multi-row commit; batch with an explicit EXCLUDED row (commits the
 rest, EXCLUDED untouched); UNRESOLVED row present (whole batch fails);
 INCOMPLETE row; NEEDS_REVIEW row; missing account / security / date /
 quantity / currency each reject; SPLIT, REVERSAL, ADJUSTMENT each reject;
-pre-existing lineage rejects; retry of a COMMITTED batch returns
+pre-existing lineage rejects;
+
+**Ownership revalidation:** attempt to construct a source row whose
+`owner_id` differs from the batch owner. The M06 composite FK
+`import_source_rows_batch_owner_fk` is expected to make that impossible; the
+test proves this by showing the INSERT itself is rejected, and proves the
+RPC's ownership condition exists (present in the function body) and that the
+abort path (`inconsistent ownership in batch`, errcode 40002) is reachable
+only past the FK. The FK is not weakened or dropped for testing.
+
+Retry of a COMMITTED batch returns
 `already_committed = true` with unchanged counts and no new rows;
 concurrency reasoning verified with two sessions (second blocks on
 `FOR UPDATE`, then takes the idempotent path); empty batch rejects;
