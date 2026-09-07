@@ -236,9 +236,29 @@ begin
     raise exception 'import_source_rows: raw source evidence is immutable'
       using errcode = 'restrict_violation';
   end if;
-  if old.resolution = 'COMMITTED' and new.resolution is distinct from old.resolution then
-    raise exception 'import_source_rows: a COMMITTED row cannot be re-opened'
-      using errcode = 'restrict_violation';
+  -- After commit the interpretation that produced the canonical transaction is
+  -- audit evidence too: it freezes completely. RESOLVED -> COMMITTED still works.
+  if old.resolution = 'COMMITTED' then
+    if new.resolution          is distinct from old.resolution
+    or new.candidate_security_id       is distinct from old.candidate_security_id
+    or new.candidate_broker_account_id is distinct from old.candidate_broker_account_id
+    or new.candidate_txn_type          is distinct from old.candidate_txn_type
+    or new.candidate_trade_date        is distinct from old.candidate_trade_date
+    or new.candidate_quantity          is distinct from old.candidate_quantity
+    or new.candidate_unit_price        is distinct from old.candidate_unit_price
+    or new.candidate_gross_amount      is distinct from old.candidate_gross_amount
+    or new.candidate_total_charges     is distinct from old.candidate_total_charges
+    or new.candidate_currency          is distinct from old.candidate_currency
+    or new.candidate_fingerprint       is distinct from old.candidate_fingerprint
+    or new.security_resolution         is distinct from old.security_resolution
+    or new.data_quality_state          is distinct from old.data_quality_state
+    or new.data_quality_issues         is distinct from old.data_quality_issues
+    or new.duplicate_of_row_id         is distinct from old.duplicate_of_row_id
+    or new.duplicate_reason            is distinct from old.duplicate_reason
+    then
+      raise exception 'import_source_rows: a COMMITTED row''s interpretation is immutable'
+        using errcode = 'restrict_violation';
+    end if;
   end if;
   return new;
 end; $$;
