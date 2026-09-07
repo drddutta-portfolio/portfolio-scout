@@ -29,5 +29,13 @@
       authenticated SELECT only, no anon access, RLS + 1 owner policy,
       no service-role credential in the application
 
+- [x] Migration 06 (db/migrations/0006_import_staging.sql) — applied and verified 2026-09-07 03:49 UTC (09:19 IST):
+      import_batches + import_source_rows (untrusted staging, both empty), enums import_row_resolution and
+      security_resolution_state, transactions.import_source_row_id lineage (+ unique index, immutable),
+      8 RESTRICT FKs incl. owner-safe duplicate self-reference, raw-evidence and committed-interpretation
+      immutability, trusted-only COMMITTING/COMMITTED/FAILED (current_user based), parent-batch locking,
+      no economic-content uniqueness, RLS + 8 policies, explicit column grants, no anon access,
+      no service-role credential in the application
+
 ## Next (awaiting approval)
-- [ ] Migration 06 (import_batches / import_source_rows) — not started (do not begin until Migration 05 is approved)
+- [ ] Migration 07 (commit_import_batch trusted RPC) — NOT started

@@ -140,6 +140,79 @@ Delete protection: deleting the owning `profiles`, `portfolios`, `broker_account
 
 All test data was created inside transactions that were rolled back; post-test row counts for `transactions` and `profiles` are 0. Secret scan clean (no service-role key, DB password or JWT in the repository), `tsgo --noEmit` clean, production build succeeded.
 
+## Migration 06 — import staging & provenance (`db/migrations/0006_import_staging.sql`)
+
+Applied and verified **2026-09-07 03:49 UTC** (09:19 IST) against the dedicated PortfolioAI Supabase project.
+
+Created: `public.import_batches`, `public.import_source_rows` (both empty), enums
+`import_row_resolution` (UNRESOLVED, RESOLVED, EXCLUDED, COMMITTED) and
+`security_resolution_state` (UNRESOLVED, RESOLVED, AMBIGUOUS, UNSUPPORTED) — public enum count now 15
+(12 foundational + `security_alias_type` + these 2). Public tables now 10.
+
+Ledger lineage: `public.transactions` gained exactly one column, `import_source_row_id uuid` (nullable),
+with owner-safe composite FK `transactions_source_row_owner_fk (owner_id, import_source_row_id)` ON DELETE
+RESTRICT and partial unique index `transactions_source_row_uidx` — one canonical transaction per staging row.
+No `import_batch_id` column was added. `transactions_guard_immutable_fields()` was extended (behaviour
+otherwise identical) so lineage is immutable too.
+
+Foreign keys: 8 relevant FKs, all `confdeltype='r'` (RESTRICT) — batch→profiles, batch→portfolios
+(owner-safe composite), row→profiles, row→import_batches (owner-safe), row→broker_accounts (owner-safe),
+row→securities (shared canonical table), row→import_source_rows (owner-safe duplicate self-reference),
+transactions→import_source_rows (owner-safe). Behavioural tests rejected cross-owner batch/portfolio,
+cross-owner row/batch, cross-owner candidate account, cross-owner duplicate reference, cross-owner
+transaction lineage and self duplicate reference; same-owner cross-batch duplicate references were accepted.
+
+Candidate numeric fields are all `numeric(38,18)`.
+
+Initial staging: a browser INSERT using only granted columns succeeds and defaults to
+`resolution=UNRESOLVED`, `data_quality_state=INCOMPLETE`, `data_quality_issues='{}'`. UNRESOLVED+INCOMPLETE
+with no issues accepted; RESOLVED+INCOMPLETE and RESOLVED+NEEDS_REVIEW with empty issues rejected
+(`import_source_rows_flagged_has_issue`); VALID with issues rejected. MISSING_ACCOUNT disclosure is required
+once past UNRESOLVED; `MISSING_BROKER` alone does not satisfy it.
+
+Raw evidence immutability: `raw_payload`, all `raw_*` strings, `id`, `import_batch_id`, `owner_id`,
+`source_row_number` and `created_at` all rejected with `raw source evidence is immutable`. Candidate
+interpretation remains editable pre-commit; `updated_at` is trigger-controlled (an attempt to set it to
+2000-01-01 was overwritten by `set_updated_at()`).
+
+Committed interpretation: RESOLVED → COMMITTED succeeds; afterwards every candidate field, security
+resolution, resolution, data-quality state/issues and duplicate reference/reason are frozen, and raw
+evidence remains immutable.
+
+Batch-state security: as `authenticated`, PREVIEWED/VALIDATED/AWAITING_CONFIRMATION succeed while
+COMMITTING and FAILED raise `insufficient_privilege` and COMMITTED is denied outright. A temporary
+SECURITY DEFINER probe (created and dropped inside a rolled-back transaction) performed
+COMMITTING and COMMITTED successfully — `current_user` based, so the future Migration 07 RPC will work.
+COMMITTED is terminal even for the trusted caller. No probe remains in the schema (0 matching functions).
+
+Parent-batch locking: while the batch is COMMITTING, and after it is COMMITTED, browser row UPDATE and
+DELETE affect 0 rows, as does batch DELETE — no race allowing interpretation changes after commit starts.
+
+Duplicates / idempotency: duplicate `(batch, source_row_number)` rejected; identical economic rows accepted;
+`file_sha256`, `candidate_fingerprint` and `raw_source_reference` are all non-unique; `unique(owner_id,
+client_request_id)` enforced when present and repeatable when NULL; a second transaction referencing the
+same source row rejected by `transactions_source_row_uidx`.
+
+Ledger regression: transactions remains browser SELECT-only (INSERT/UPDATE/DELETE denied), anon has no
+access, owner RLS intact, economic/source fields and now lineage immutable, metadata-only updates still
+allowed. No cost-basis, FIFO/LIFO/weighted-average or P&L logic was introduced.
+
+RLS / grants / functions: RLS enabled on both tables with exactly 4 policies each (SELECT/INSERT/UPDATE/
+DELETE, owner-scoped). `anon` has no privilege of any kind on either table. `authenticated` has table
+SELECT/DELETE plus exactly the approved INSERT and UPDATE column sets (no timestamps, no owner rewrite,
+no committed_at). `import_source_rows_guard_raw()`, `import_batches_guard_state()` and
+`transactions_guard_immutable_fields()` are all `prosecdef=false` with `search_path=""` and no PUBLIC/
+anon/authenticated EXECUTE. `public.set_updated_at()` unchanged.
+
+Deletion / retention: deleting a batch that still has source rows, a source row referenced as duplicate
+evidence, and a source row referenced by a canonical transaction are all blocked by RESTRICT. No CASCADE.
+
+All 83 behavioural checks passed inside transactions that were rolled back; post-test row counts for
+`import_batches`, `import_source_rows`, `transactions`, `profiles`, `portfolios`, `broker_accounts`,
+`securities` and `auth.users` are all 0. Secret scan clean, `tsgo --noEmit` clean, production build
+succeeded. No service-role application credential exists; the `service_role` GRANT is a database-role
+grant only.
+
 ## Binding migration rule — explicit grants only
 
 From Migration 02a onward, `public` objects created by the migration role
