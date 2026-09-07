@@ -21,5 +21,13 @@
       normalize_alias, RESTRICT FK, RLS + 2 SELECT policies, punctuation-preserving normalization,
       no is_confirmed / resolution-workflow fields
 
+- [x] Migration 05 (db/migrations/0005_transactions.sql) — applied and verified 2026-09-07 03:22 UTC (08:52 IST):
+      public.transactions (canonical ledger, empty), owner-safe composite FKs to portfolios and
+      broker_accounts, 4 RESTRICT FKs, 13 checks incl. MISSING_ACCOUNT disclosure and
+      SPLIT/REVERSAL/ADJUSTMENT -> NEEDS_REVIEW, economic-immutability trigger
+      (SECURITY INVOKER, search_path=""), no source-reference idempotency index,
+      authenticated SELECT only, no anon access, RLS + 1 owner policy,
+      no service-role credential in the application
+
 ## Next (awaiting approval)
-- [ ] Migration 05 (transactions) — not started (do not begin until Migration 04 is reported and approved)
+- [ ] Migration 06 (import_batches / import_source_rows) — not started (do not begin until Migration 05 is approved)
