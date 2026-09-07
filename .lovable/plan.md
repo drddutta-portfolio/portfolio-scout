@@ -117,7 +117,7 @@ create table public.import_source_rows (
   resolution                public.import_row_resolution not null default 'UNRESOLVED',
   data_quality_state        public.data_quality_state not null default 'INCOMPLETE',
   data_quality_issues       public.data_quality_issue[] not null default '{}',
-  duplicate_of_row_id       uuid references public.import_source_rows(id) on delete restrict,
+  duplicate_of_row_id       uuid,
   duplicate_reason          text,
   created_at                timestamptz not null default now(),
   updated_at                timestamptz not null default now(),
@@ -144,8 +144,12 @@ create table public.import_source_rows (
     (security_resolution = 'RESOLVED') = (candidate_security_id is not null)),
   constraint import_source_rows_valid_no_issues check (
     data_quality_state <> 'VALID' or cardinality(data_quality_issues) = 0),
+  -- An initial UNRESOLVED row may have no issue yet: validation has not run.
+  -- Once past UNRESOLVED, a non-VALID state must name at least one issue.
   constraint import_source_rows_flagged_has_issue check (
-    data_quality_state = 'VALID' or cardinality(data_quality_issues) >= 1),
+    resolution = 'UNRESOLVED'
+    or data_quality_state = 'VALID'
+    or cardinality(data_quality_issues) >= 1),
   constraint import_source_rows_missing_account_disclosed check (
     candidate_broker_account_id is not null
     or 'MISSING_ACCOUNT' = any(data_quality_issues)
