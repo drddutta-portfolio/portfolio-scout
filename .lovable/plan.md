@@ -1,185 +1,244 @@
-# PortfolioAI — Migration 08 Proposal, Revision 2 (REVIEW ONLY — NOT APPLIED)
+# PortfolioAI — First Functional UI (Phase 1)
 
-**Scope (approved):** `public.portfolio_security_settings` + derived `public.current_holdings` **view**. Corporate actions deferred to Migration 09. No market data, no engines, no cost-basis/P&L, no UI. No migration file created; nothing applied to Supabase.
+Planning only. Built entirely on the deployed M01–M08 backend.
 
-**Revision 2 changes (only these):**
-1. Any ACTIVE SPLIT / REVERSAL / ADJUSTMENT for a holding now forces `net_quantity = NULL` (previously the numeric sum of the remaining rows was still returned — unsafe: BUY 100 + SPLIT 2:1 would have shown 100 as a potentially false current holding).
-2. Fully-resolved zero holdings (`net_quantity = 0`) are now genuinely omitted, implemented with a derived subquery + outer `WHERE` (previously the "zero holdings produce no rows" statement was not implemented — GROUP BY would still have emitted the row).
-3. Negative derived quantity decision resolved: returned visibly, never hidden or converted to NULL (open question closed).
-4. Documented explicitly: role-change history is **deferred**, not removed from the roadmap.
+Explicit confirmations: no Migration 09, no schema changes, no corporate-action
+modelling, no market data, no P&L or cost basis, no AI/engines, no service-role
+application credential.
 
-## 1. Design principles carried forward
+## 0. Backend gaps found (blocking, verified in the deployed SQL)
 
-- `public.transactions` (txn_state = 'ACTIVE') remains the sole accounting source of truth. `current_holdings` is a **view**, not a stored ledger — it cannot drift, be overwritten, or become a competing source.
-- A non-NULL `net_quantity` means: **every** ACTIVE quantity-affecting transaction for the holding is currently understood and has a usable quantity. If any SPLIT/REVERSAL/ADJUSTMENT exists, or any supported row has NULL quantity, `net_quantity` is NULL and the counters disclose why. Nothing is guessed; no corporate-action effect is calculated in M08.
-- No cost basis, no average price, no P&L, no market value, no portfolio weight anywhere in this migration. No accounting-method default (no FIFO/LIFO/weighted-average assumption).
-- No new enums: reuses M01 `portfolio_role` (CORE/SATELLITE/THEMATIC/WATCHLIST/UNASSIGNED). Core ≈ 35 remains a stock **count** (`portfolios.core_target_count`), untouched.
-- RESTRICT deletion everywhere; owner-safe composite FKs; RLS designed with the schema; no anon access; no service-role credential.
-- **Role-change history is deferred** to a later reviewed migration (audit/decision layer); `portfolio_security_settings.role` holds only the current role. This is a deferral, not a removal from the roadmap.
+1. **Security master is empty and browser-read-only.** `securities` /
+   `security_aliases` have `SELECT` only for `authenticated`, and no rows were
+   ever seeded. `import_source_rows_security_state_ck` requires
+   `candidate_security_id` for `security_resolution = 'RESOLVED'`, and
+   `commit_import_batch` requires RESOLVED rows. **Therefore no import can be
+   committed until reference securities exist.** Agreed resolution: a separate,
+   separately reviewed seed migration (call it 09a) is a prerequisite for the
+   Import → Commit half of the UI. The UI is designed and built to work the
+   moment that data exists; nothing is invented or worked around here.
+2. **No public signup.** Users are created manually in the Supabase dashboard.
+   The app ships login + password reset only.
+3. **No profile auto-creation trigger.** `profiles` has an owner-scoped INSERT
+   grant, so the app self-provisions the caller's `profiles` row (and
+   `user_settings` row) on first authenticated load. This is inside existing
+   grants — no backend change.
+4. **No alias-confirmation write path.** Confirming "this source text means this
+   security" cannot be persisted (aliases are read-only). Resolution is
+   per-import-row only; a future reviewed migration would add reusable mappings.
 
-## 2. Object 1 — `public.portfolio_security_settings` (unchanged from Revision 1)
+Everything else in the requested journey is supported by existing grants/RLS.
 
-Per-portfolio, per-security user configuration. Non-financial configuration data (not accounting history), so owner-scoped browser INSERT/UPDATE/DELETE is permitted under RLS.
+## 1. Route map
 
-```sql
-create table public.portfolio_security_settings (
-  id           uuid primary key default gen_random_uuid(),
-  owner_id     uuid not null references public.profiles(id) on delete restrict,
-  portfolio_id uuid not null,
-  security_id  uuid not null references public.securities(id) on delete restrict,
-  role         public.portfolio_role not null default 'UNASSIGNED',
-  notes        text,
-  created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now(),
-
-  constraint pss_portfolio_owner_fk
-    foreign key (owner_id, portfolio_id)
-    references public.portfolios (owner_id, id) on delete restrict,
-
-  constraint pss_unique_per_portfolio_security
-    unique (owner_id, portfolio_id, security_id),
-
-  constraint pss_notes_len check (notes is null or char_length(notes) <= 4000)
-);
-
-create index pss_owner_portfolio_idx on public.portfolio_security_settings (owner_id, portfolio_id);
-create index pss_owner_security_idx  on public.portfolio_security_settings (owner_id, security_id);
+```text
+/login                       public — email/password
+/forgot-password             public — request reset email
+/reset-password              public — token landing, set new password
+/                            redirect -> /dashboard
+/_app                        protected layout (session gate + shell)
+  /dashboard
+  /holdings
+  /import                    batch list + new upload
+  /import/$batchId           workspace: preview / resolve / review / confirm
+  /settings                  tabs: profile, preferences, portfolios, accounts
 ```
 
-- Timestamps protected exactly as M02: reuse `public.set_updated_at()` trigger; `created_at`/`updated_at` excluded from INSERT/UPDATE column grants. Identity keys (`owner_id`, `portfolio_id`, `security_id`) are insert-only — not in the UPDATE grant.
-- Grants (explicit, per the M02a hardened-defaults model):
-  - `revoke all` from `anon`/`authenticated`/`PUBLIC`, then:
-  - `grant select on ... to authenticated;`
-  - `grant insert (owner_id, portfolio_id, security_id, role, notes) to authenticated;`
-  - `grant update (role, notes) to authenticated;`
-  - `grant delete on ... to authenticated;` (justified: config data, not financial history)
-  - `grant all on ... to service_role;` (Supabase/admin compatibility only, as in M05)
-- RLS enabled; four owner-scoped policies, all `using (owner_id = auth.uid())`:
-  - `pss_select_own` (SELECT), `pss_insert_own` (INSERT, WITH CHECK), `pss_update_own` (UPDATE, USING + WITH CHECK), `pss_delete_own` (DELETE).
-- Cross-tenant role assignment is impossible: composite FK forces the portfolio to belong to the same owner_id; RLS forces owner_id = caller.
+Protection uses a `_authenticated`-style pathless layout whose loader/component
+waits for the Supabase session and redirects to `/login` otherwise. All data is
+fetched client-side (the browser client holds the session; no server function
+touches user data), so no protected loader runs during prerender.
 
-## 3. Object 2 — `public.current_holdings` (derived view, REVISED)
+## 2. Component hierarchy
 
-```sql
-create view public.current_holdings
-with (security_invoker = true) as
-with derived as (
-  select
-    t.owner_id,
-    t.portfolio_id,
-    t.security_id,
-    -- A non-NULL net_quantity means every ACTIVE quantity-affecting
-    -- transaction for this holding is understood and has a usable quantity.
-    case
-      -- (a) unhandled semantics present: never guess SPLIT/REVERSAL/ADJUSTMENT effects
-      when count(*) filter (
-        where t.txn_type in ('SPLIT','REVERSAL','ADJUSTMENT')
-      ) > 0 then null
-      -- (b) supported row with missing quantity: missing is not zero
-      when count(*) filter (
-        where t.txn_type in ('BUY','SELL','OPENING_POSITION','TRANSFER_IN','TRANSFER_OUT','BONUS')
-          and t.quantity is null
-      ) > 0 then null
-      -- (c) fully understood: explicit signed sum over supported types only
-      else sum(
-        case
-          when t.txn_type in ('BUY','OPENING_POSITION','TRANSFER_IN','BONUS') then  t.quantity
-          when t.txn_type in ('SELL','TRANSFER_OUT')                             then -t.quantity
-        end
-      ) filter (
-        where t.txn_type in ('BUY','SELL','OPENING_POSITION','TRANSFER_IN','TRANSFER_OUT','BONUS')
-      )
-    end as net_quantity,
-    count(*) as active_txn_count,
-    count(*) filter (where t.txn_type in ('SPLIT','REVERSAL','ADJUSTMENT')) as unhandled_txn_count,
-    count(*) filter (
-      where t.txn_type in ('BUY','SELL','OPENING_POSITION','TRANSFER_IN','TRANSFER_OUT','BONUS')
-        and t.quantity is null
-    ) as missing_quantity_count,
-    count(*) filter (where t.data_quality_state <> 'VALID') as non_valid_txn_count,
-    min(t.trade_date) as first_trade_date,
-    max(t.trade_date) as last_trade_date
-  from public.transactions t
-  where t.txn_state = 'ACTIVE'
-  group by t.owner_id, t.portfolio_id, t.security_id
-)
-select
-  owner_id, portfolio_id, security_id,
-  net_quantity, active_txn_count, unhandled_txn_count,
-  missing_quantity_count, non_valid_txn_count,
-  first_trade_date, last_trade_date
-from derived
--- Omit fully-resolved zero holdings. Rows whose net_quantity is NULL
--- (unhandled/missing data) and negative quantities stay visible for disclosure.
-where net_quantity is distinct from 0;
+```text
+AppShell
+  SidebarNav (Dashboard, Holdings, Import, Settings; future items omitted)
+  TopBar (PortfolioSwitcher, user menu -> Settings, Logout)
+  <Outlet/>
+
+Dashboard        StatCard, RoleMixCard, DataQualityCard, LatestImportCard
+Holdings         HoldingsToolbar (search/filter/sort), HoldingsTable,
+                 HoldingRow -> QuantityCell, StatusBadges, RoleSelect, NotesDialog
+Import           BatchList, NewImportDialog(FileDropzone)
+ImportWorkspace  StepHeader (Upload>Preview>Validate>Resolve>Review>Confirm)
+                 RowTable (virtualised), RowDetailPanel,
+                 SecurityResolver, BrokerAccountResolver (+ inline create),
+                 IssueList, ExcludeToggle, CommitPanel
+Shared           StateBadge, EmptyState, ErrorState, LoadingSkeleton,
+                 UnavailableValue ("—" + reason tooltip, never 0)
 ```
 
-Semantics (documented in the migration comments):
+## 3. User journey
 
-- **Non-NULL `net_quantity` guarantee:** every ACTIVE transaction for the holding has a currently-understood quantity effect and a non-NULL quantity. Supported directions: BUY +, OPENING_POSITION +, TRANSFER_IN +, BONUS +, SELL −, TRANSFER_OUT −.
-- **Unhandled types invalidate the number:** any ACTIVE SPLIT / REVERSAL / ADJUSTMENT ⇒ `net_quantity` NULL, `unhandled_txn_count > 0`. Example: BUY 100 + SPLIT ⇒ NULL, not 100. No corporate-action interpretation exists in M08; this preserves the no-silent-double-counting invariant.
-- **NULL quantity rule retained:** any supported ACTIVE row with NULL quantity ⇒ `net_quantity` NULL, `missing_quantity_count > 0`.
-- **Zero-holding rule (now implemented):** a fully-resolved holding netting to exactly 0 (e.g. BUY 10 + SELL 10, no unhandled/missing/problem rows) produces **no row**. The outer `net_quantity is distinct from 0` filter keeps NULL and negative rows visible: BUY 10 + SELL 10 + SPLIT ⇒ row present, net_quantity NULL, unhandled_txn_count = 1. Negative quantities (over-sold / data problem) remain visible so `NEGATIVE_DERIVED_QUANTITY` can be flagged by consumers — never hidden or converted to NULL.
-- `non_valid_txn_count` keeps source-data quality visible (INCOMPLETE/NEEDS_REVIEW contributing rows) without suppressing the holding.
-- `first_trade_date`/`last_trade_date` may be NULL where source dates are NULL (M05 preserves NULL dates); no date is fabricated.
-- No prices, no cost basis, no average price, no P&L, no market value, no portfolio weight columns.
-- `security_invoker = true`: the view executes as the caller, so the M05 owner-scoped RLS on `transactions` is the security boundary — no new policy surface, no cross-owner leakage. View owner `postgres`; `grant select on public.current_holdings to authenticated;` only; nothing to anon/PUBLIC. No SECURITY DEFINER object anywhere in M08.
+Login → shell loads profile/settings/portfolios → pick active portfolio (stored
+in localStorage, validated against the user's portfolios) → Import → upload file
+→ rows staged raw → preview → validate → resolve securities/accounts → exclude
+what shouldn't post → confirm → `commit_import_batch` → Holdings shows derived
+positions → assign roles → Dashboard counts update.
 
-## 4. Exact migration file (to be created only on approval)
+## 4. Data per screen (exact objects)
 
-`db/migrations/0008_derived_holdings.sql`, one transaction:
-1. `create table public.portfolio_security_settings (...)` as above
-2. its indexes, `set_updated_at` trigger, explicit grants/revokes, RLS + 4 policies, comments
-3. `create view public.current_holdings ... security_invoker = true` as above (derived CTE + outer filter)
-4. view grant (authenticated SELECT only) + comments documenting derivation and zero-holding semantics
-5. Nothing else — no seeds, no other tables, no functions, no enum changes, no ALTER of M01–M07 objects.
+| Screen | Reads | Writes |
+| --- | --- | --- |
+| Bootstrap | `profiles`, `user_settings`, `portfolios` | insert own `profiles`, `user_settings` if absent |
+| Dashboard | `current_holdings`, `portfolio_security_settings`, `transactions` (count), `import_batches` (latest) | none |
+| Holdings | `current_holdings` + `securities` (name/symbol/exchange) + `portfolio_security_settings` | insert/update `portfolio_security_settings` (role, notes) |
+| Import list | `import_batches` | insert `import_batches` (UPLOADED); delete own batch in deletable states |
+| Preview/Validate/Resolve | `import_source_rows`, `securities`, `security_aliases`, `brokers`, `broker_accounts` | insert raw rows; update candidate/resolution/quality columns; update batch `state`, counters; insert `broker_accounts` inline |
+| Confirm | aggregate counts from `import_source_rows` | `rpc('commit_import_batch', { p_batch_id })` |
+| Settings | `profiles`, `user_settings`, `portfolios`, `brokers`, `broker_accounts` | update profile/settings; insert/update portfolios; insert/update/archive broker accounts |
 
-## 5. Rollback (unchanged)
+`public.transactions` is never written from the browser (no grant, by design).
 
-```sql
-begin;
-drop view if exists public.current_holdings;
-drop table if exists public.portfolio_security_settings;  -- no CASCADE; nothing references it
-commit;
-```
-Safe: no other object depends on either. Never `drop ... cascade`.
+## 5. State management
 
-## 6. Security implications
+- TanStack Query for all server state; query keys namespaced by user + active
+  portfolio (`['holdings', portfolioId]`, `['batch', batchId, 'rows']`).
+- Supabase session in a small `AuthProvider` around the protected layout,
+  subscribing to `onAuthStateChange`; sign-out clears the query cache.
+- Active portfolio in a `PortfolioProvider` (localStorage-backed, validated).
+- Local-only UI state (filters, sort, step) in component state / URL search
+  params so the import workspace is refresh-safe.
+- Mutations invalidate precisely; no optimistic writes on anything that changes
+  resolution or batch state.
 
-- No SECURITY DEFINER anything. The view uses `security_invoker` so existing transaction RLS is the enforcement point.
-- Settings table adds browser DELETE for the first time — justified (non-financial config), owner-scoped by RLS, RESTRICT FKs prevent dangling references both ways.
-- No anon access; no service-role application credential; no secrets; grants are explicit (M02a hardened defaults mean nothing is granted implicitly).
+## 6. Import parsing
 
-## 7. Verification plan
+- Parsing happens entirely in the browser; the file itself is never uploaded
+  anywhere. CSV via a small parser, XLSX/XLS via SheetJS-style reader (new
+  frontend dependency, approved).
+- `source_format` set to `CSV` / `XLSX` / `XLS` (values already allowed by the
+  check constraint). No enum change.
+- SHA-256 of the file bytes computed with WebCrypto → `file_sha256`, plus
+  `file_size_bytes`, `mime_type`, `original_filename`, `client_request_id`
+  (idempotent re-upload guard), `total_source_rows`.
+- Column mapping step: header row auto-suggested, user confirms the mapping.
+  Every raw cell is written verbatim to `raw_*` and the whole row to
+  `raw_payload`. Nothing is coerced at insert time — raw stays raw.
+- Rows inserted in chunks while the batch is `UPLOADED`, then batch → `PREVIEWED`.
 
-Structural:
-- Exactly 2 new objects (+ indexes/trigger/policies); tables 10 → 11; views 0 → 1; functions 6 and enums 15 unchanged.
-- Settings: composite owner-safe FK, unique (owner_id, portfolio_id, security_id), all FKs RESTRICT, RLS + 4 policies, exact column grants, `created_at`/`updated_at`/identity keys not client-rewritable, trigger present and SECURITY INVOKER.
-- View: `security_invoker=true`, owner postgres, authenticated SELECT-only, anon/PUBLIC nothing, definition contains the unhandled-type NULL rule and the outer zero filter.
+## 7. Validation workflow
 
-Behavioural (temporary data, rolled back):
-- Two users: cross-owner SELECT/INSERT/UPDATE/DELETE on settings denied; cross-owner portfolio FK rejected; duplicate (owner, portfolio, security) settings row rejected; timestamp forging and identity-key UPDATE rejected.
-- Derivation: BUY 10 + BUY 5 − SELL 4 + OPENING_POSITION 2 + TRANSFER_IN 3 − TRANSFER_OUT 1 + BONUS 1 ⇒ net_quantity 16.
-- **Unhandled invalidation (new):**
-  - BUY 100 + SPLIT ⇒ net_quantity NULL, unhandled_txn_count = 1
-  - BUY 100 + ADJUSTMENT ⇒ net_quantity NULL, unhandled_txn_count = 1
-  - BUY 100 + REVERSAL ⇒ net_quantity NULL, unhandled_txn_count = 1
-- NULL quantity: BUY 10 + BUY (NULL qty) ⇒ net_quantity NULL, missing_quantity_count = 1.
-- **Zero-holding filter (new):**
-  - BUY 10 + SELL 10, all clean ⇒ no current_holdings row
-  - BUY 10 + SELL 10 + SPLIT ⇒ row present, net_quantity NULL, unhandled_txn_count = 1
-  - BUY 5 + SELL 10 ⇒ row present, net_quantity = −5 (visible, not nulled)
-- SUPERSEDED/REVERSED transactions excluded entirely from every aggregate.
-- NEEDS_REVIEW/INCOMPLETE contributing rows ⇒ non_valid_txn_count correct, row still visible.
-- Cross-owner isolation through the view (user B sees zero of user A's rows).
-- M05/M06/M07 regression: policies, FKs, grants, and `commit_import_batch` unchanged.
+Client-side interpretation writes only `candidate_*`, `security_resolution`,
+`resolution`, `data_quality_state`, `data_quality_issues`:
 
-Then: secret scan, `tsc` type check, production build, update `docs/migrations.md` + `roadmap.md`, commit/sync to private GitHub.
+- Unparseable number/date → candidate stays NULL and an issue is recorded
+  (`MISSING_QUANTITY`, `MISSING_DATE`, `MISSING_PRICE`). Never 0.
+- Security: exact match on ISIN, then exchange+symbol, then normalized alias.
+  One exact hit → suggested candidate, marked *suggested* in the UI until the
+  user confirms; several hits → `AMBIGUOUS` + `AMBIGUOUS_SECURITY`; none →
+  `UNRESOLVED` + `UNRESOLVED_SECURITY`. Types the ledger can't take yet
+  (SPLIT/REVERSAL/ADJUSTMENT) → `UNSUPPORTED` +
+  `UNSUPPORTED_CORPORATE_ACTION`. No fuzzy scoring auto-selects anything.
+- Broker account: matched only on an explicit user mapping of the raw broker/
+  account text to one of their `broker_accounts`; unknown institution →
+  `MISSING_BROKER`, known but unidentified account → `MISSING_ACCOUNT`. Each
+  demat account stays distinct; rows are never merged by security.
+- Duplicates: fingerprint over (account, security, type, date, quantity, price)
+  → `duplicate_of_row_id` + `DUPLICATE_SUSPECTED`, flagged, never removed.
+- A row becomes `RESOLVED` only with security + type + date + quantity +
+  currency + account present and zero issues; the DB check constraints enforce
+  this independently.
+- Batch state moves `PREVIEWED → VALIDATED → AWAITING_CONFIRMATION` (all inside
+  the browser's UPDATE policy); `COMMITTING/COMMITTED/FAILED` are trusted-only.
 
-## 8. Compatibility
+## 8. Excluded rows
 
-- Purely additive; no change to M01–M07 objects. M07 RPC untouched; committed transactions flow into the view automatically.
-- Forward-compatible with M09 corporate actions: when split/reversal/adjustment semantics are formally implemented, rule (a) is revisited by a reviewed migration; until then holdings affected by them are disclosed as unavailable rather than misstated.
-- No accounting-method assumption, so later cost-basis engine choices remain open.
+`resolution = 'EXCLUDED'` via an explicit toggle with a reason note. Excluded
+rows stay in the table, appear in a dedicated "Excluded" tab and in the confirm
+summary, and never produce transactions. Nothing is auto-deleted.
 
-**Status: NOT APPLIED. No migration file created. Awaiting final approval.**
+## 9. Confirmation and commit
+
+Confirm screen: total staged, committable (RESOLVED+VALID+no issues), excluded,
+unresolved/problem rows, target portfolio, source filename, file hash. Confirm
+is enabled only when zero rows remain `UNRESOLVED` and at least one is
+committable — mirroring the RPC's own preconditions.
+
+Action calls only `commit_import_batch(batch_id)`. No economics re-sent. Error
+codes are surfaced with plain-language meaning: `55006` already in progress,
+`22023` not ready / row problem (shows the row number from the message),
+`40002` inconsistent data — **no automatic retry**; `42501` not found/not yours.
+Success shows inserted/excluded counts and links to Holdings.
+
+## 10. Holdings presentation
+
+From `current_holdings` joined to `securities` and the user's role settings:
+security (name, symbol, exchange), net quantity, role, active txn count, first
+and last trade date, disclosure badges.
+
+Quantity cell states:
+- number → plain value;
+- `net_quantity IS NULL` → **UNAVAILABLE** (never 0) with the reason:
+  "affected by SPLIT/REVERSAL/ADJUSTMENT — corporate-action handling not
+  implemented yet" or "a contributing transaction has no quantity";
+- negative → flagged as a probable source/accounting problem, still shown;
+- `unhandled_txn_count > 0`, `missing_quantity_count > 0`,
+  `non_valid_txn_count > 0` → distinct badges, each with its own wording.
+
+Filters/sorts: text search on name/symbol, role, quantity, unavailable-quantity,
+negative, unhandled, unassigned. Nothing requiring prices.
+
+## 11. Role management
+
+Inline `RoleSelect` per holding writing `portfolio_security_settings`
+(insert-or-update on owner+portfolio+security), values CORE / SATELLITE /
+THEMATIC / WATCHLIST / UNASSIGNED, plus a notes dialog (≤4000 chars). Role is
+explicitly independent of asset class and of data quality. Dashboard shows
+"Core: n of target m" where m is `portfolios.core_target_count` — labelled a
+**stock-count target**, never a percentage. No role-history UI.
+
+## 12. Settings
+
+Tabs: Profile (display name), Preferences (locale, timezone, date format,
+number locale), Portfolios (name, description, core target count, archive;
+base currency shown read-only after creation because it is insert-only by
+grant), Broker accounts (broker, nickname, masked reference, archive). No
+credentials, no API keys, anywhere.
+
+## 13. Dashboard (Phase 1 metrics only)
+
+Holdings count; holdings with a role assigned; Core vs core target; Satellite;
+Thematic; Watchlist; Unassigned; unavailable-quantity count; negative-quantity
+count; unhandled-transaction-affected count; total active transactions; latest
+import batch (filename, state, counts, time). No value, weight, P&L, return or
+chart of any kind.
+
+## 14. Visual design
+
+Desktop-first, responsive down to tablet/phone (tables collapse to stacked
+cards). Restrained investment-terminal look: neutral dark-capable palette with a
+single accent, one grotesque/mono pairing for figures, tabular numerals, dense
+but airy tables, semantic status badges (neutral grey for *unavailable*, amber
+for *needs review*, red only for genuine problems), no animation beyond
+transitions, no charts, no placeholder numbers. All colours as design tokens.
+
+## 15. Test plan
+
+Login and session protection; redirect of unauthenticated deep links; logout
+clears cache. Portfolio selection persists and rejects a foreign id. CSV and
+XLSX parse into raw rows with values preserved verbatim. Validation display for
+each issue type. Unresolved security blocks confirm. Missing account blocks
+confirm and stays `MISSING_ACCOUNT` (distinct from `MISSING_BROKER`). Excluded
+row survives and never posts. Successful commit inserts exactly the committable
+rows and freezes the batch. Commit error paths per errcode with no auto-retry.
+Holdings derivation, NULL quantity rendered as unavailable, negative shown.
+Role assignment round-trips. Cross-user isolation (second account sees nothing).
+Direct `transactions` insert from the browser is rejected.
+
+## 16. Implementation order
+
+1. Auth (login, reset, session gate) + profile/settings self-provisioning.
+2. App shell, navigation, portfolio context, design tokens.
+3. Settings (portfolios, broker accounts) — needed before import is useful.
+4. Holdings + role management (works with any transactions that exist).
+5. Dashboard metrics.
+6. Import: upload/parse/stage → preview.
+7. Validation + resolution + exclusion.
+8. Confirm + trusted commit + result handling.
+9. Tests and polish.
+
+Steps 6–8 can be built and unit-tested before the security seed exists, but
+end-to-end commit cannot be exercised until the separately reviewed seed
+migration lands.
