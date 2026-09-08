@@ -242,3 +242,12 @@ Direct `transactions` insert from the browser is rejected.
 Steps 6–8 can be built and unit-tested before the security seed exists, but
 end-to-end commit cannot be exercised until the separately reviewed seed
 migration lands.
+
+## 17. Noted for later (not in this UI)
+
+Weighted-average cost was raised as a candidate cost-basis method (e.g. 10 @ 100
+plus 10 @ 150 gives an average of 125; selling 12 @ 200 realises 900 and leaves 8
+units at 1,000 remaining cost). This is recorded only as a future decision input.
+Phase 1 shows no cost basis, no realised or unrealised P&L, and assumes no
+accounting method — the interface stays replaceable, exactly as approved.
+
