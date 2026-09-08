@@ -31,7 +31,7 @@ import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-NS = uuid.UUID("6f0a1f2c-8b1e-5c3a-9d4e-portfolioai".replace("portfolioai", "0a1b2c3d"))
+NS = uuid.UUID("6f0a1f2c-8b1e-5c3a-9d4e-0a1b2c3d4e5f")
 
 SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9&._\-]{0,31}$")
 ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
