@@ -60,7 +60,7 @@
       Deferred: role-change history and corporate-action modelling.
 
 ## In progress
-- [ ] Migration 09a (security master seed) — ARTIFACT GENERATED AND DRY-RUN VERIFIED (rolled back), awaiting approval. See `docs/migration-09a-review.md`.
+- [x] Migration 09a (security master seed) — DEPLOYED AND VERIFIED 2026-09-08: 6,114 securities / 28,979 aliases, idempotent. See `docs/migration-09a-review.md`. DATABASE EXPANSION STOPPED.
       Build from authoritative NSE/BSE/depository sources, deterministic dedup + review report.
 
 ## Next (awaiting approval)
