@@ -1,0 +1,46 @@
+[
+  {
+    "id": "nse_equity",
+    "publisher": "National Stock Exchange of India (NSE)",
+    "file": "EQUITY_L.csv",
+    "url": "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
+    "description": "NSE list of securities available for equity trading",
+    "retrieved_utc": "2026-09-08T08:46:39Z",
+    "sha256": "ca32c2618ee2da5e99a6c883e10fa39c6f0d75166923e729c0f6a76151dd47aa",
+    "bytes": 181573,
+    "rows_read": 2571
+  },
+  {
+    "id": "nse_sme",
+    "publisher": "National Stock Exchange of India (NSE) \u2014 Emerge (SME) platform",
+    "file": "SME_EQUITY_L.csv",
+    "url": "https://nsearchives.nseindia.com/emerge/corporates/content/SME_EQUITY_L.csv",
+    "description": "NSE Emerge SME list of securities",
+    "retrieved_utc": "2026-09-08T08:46:41Z",
+    "sha256": "51dfb02de0a19804bddd7acbe75a208b3d3d7d84784b3d3d33146a51d1bb99fd",
+    "bytes": 39619,
+    "rows_read": 571
+  },
+  {
+    "id": "nse_etf",
+    "publisher": "National Stock Exchange of India (NSE)",
+    "file": "eq_etfseclist.csv",
+    "url": "https://nsearchives.nseindia.com/content/equities/eq_etfseclist.csv",
+    "description": "NSE list of listed exchange traded funds",
+    "retrieved_utc": "2026-09-08T08:46:40Z",
+    "sha256": "f246cdf059b005db06e71d19c6288b135a6d19ba49e4dee09347c0094a45d420",
+    "bytes": 37434,
+    "rows_read": 350
+  },
+  {
+    "id": "bse_all",
+    "publisher": "BSE Ltd",
+    "file": "bse_all.json",
+    "url": "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=All&status=Active",
+    "description": "BSE list of active scrips (all segments)",
+    "retrieved_utc": "2026-09-08T08:50:18Z",
+    "sha256": "1c5cc3340239755c7a416319d2107033f9e42b1b33023ccbce3310c6a71535b1",
+    "bytes": 4539588,
+    "rows_read": 5333
+  }
+]
