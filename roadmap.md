@@ -60,7 +60,7 @@
       Deferred: role-change history and corporate-action modelling.
 
 ## In progress
-- [ ] Migration 09a (security master seed) — ARTIFACT PREPARATION ONLY, not applied.
+- [ ] Migration 09a (security master seed) — ARTIFACT GENERATED AND DRY-RUN VERIFIED (rolled back), awaiting approval. See `docs/migration-09a-review.md`.
       Build from authoritative NSE/BSE/depository sources, deterministic dedup + review report.
 
 ## Next (awaiting approval)
