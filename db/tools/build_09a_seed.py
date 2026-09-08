@@ -105,11 +105,16 @@ def isin_type(isin: str | None) -> str | None:
 
 
 def isin_asset_class(isin: str | None) -> str | None:
-    """Depository-level instrument evidence, or None when not decisive."""
+    """Depository-level instrument evidence, or None when not decisive.
+
+    'FUND' means the ISIN belongs to the Indian fund (INF) space, which covers
+    both exchange-traded funds and ordinary mutual-fund schemes. It is NOT
+    decisive on its own; the caller must consult the exchange ETF listings.
+    """
     if not isin:
         return None
     if isin.startswith("INF"):
-        return "ETF"          # mutual-fund/ETF ISIN space; exchange-listed here
+        return "FUND"
     t = isin_type(isin)
     if t in ISIN_TYPE_INVIT:
         return "INVIT"
@@ -124,6 +129,7 @@ class Report:
     def __init__(self) -> None:
         self.exclusions: list[dict] = []
         self.conflicts: list[dict] = []
+        self.notes: list[dict] = []
 
     def exclude(self, source: str, ident: str, reason: str, detail: str = "") -> None:
         self.exclusions.append(
@@ -132,6 +138,10 @@ class Report:
 
     def conflict(self, kind: str, ident: str, detail: str) -> None:
         self.conflicts.append({"kind": kind, "identifier": ident, "detail": detail})
+
+    def note(self, kind: str, ident: str, detail: str) -> None:
+        self.notes.append({"kind": kind, "identifier": ident, "detail": detail})
+
 
 
 def load_nse_equity(path: str, rep: Report) -> list[dict]:
