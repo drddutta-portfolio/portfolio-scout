@@ -342,3 +342,41 @@ grant `anon` access unless a policy deliberately allows anonymous reads.
 04 securities/security_aliases · 05 transactions · 06 import_batches/import_source_rows ·
 07 commit_import_batch() · 08 current_holdings/portfolio_security_settings/role_change_history/corporate_actions ·
 09 engine_definitions/versions/runs/results · 10 credit_agencies/credit_observations · 11 themes/security_themes
+
+## Migration 09a — security master seed (`db/migrations/0009a_security_master_seed.sql`)
+
+Applied 2026-09-08 UTC. **Reference data only — no schema, function, policy or
+grant change.** INSERT-only into the existing shared read-only tables
+`public.securities` (6,114 rows) and `public.security_aliases` (28,979 rows).
+
+Row counts immediately before: `securities = 0`, `security_aliases = 0`.
+Row counts after: 6,114 / 28,979. Re-running the file inserts 0 rows.
+
+Composition: EQUITY 5,445 (including 569 NSE Emerge SME), ETF 574, INVIT 18,
+REIT 9, UNKNOWN 68. Aliases: ISIN 6,112, EXCHANGE_SYMBOL 14,155,
+COMPANY_NAME 8,712. Zero duplicate canonical ISINs, zero duplicate
+(exchange, primary_symbol), zero orphan aliases.
+
+Sources: official NSE equity / Emerge SME / ETF lists and the BSE active-scrip
+API, with URLs, retrieval times and SHA-256 hashes in
+`db/seeds/0009a/manifest.json`. No depository or regulatory dataset was used —
+none was freely usable — and no unofficial substitute was introduced.
+
+Accepted data-quality decisions: 68 exchange-listed fund units whose type is
+not deterministically establishable stay `UNKNOWN`; 58 ambiguous name/symbol
+collisions are withheld from the seed and preserved in
+`db/seeds/0009a/conflicts.csv`; BSE debt/CP/preference segments are out of
+Phase 1 scope (`db/seeds/0009a/exclusions.csv`).
+
+Security unchanged from M04: `authenticated` holds `SELECT` only on both
+tables, `anon` has no privilege, RLS enabled with one SELECT policy each. No
+application service-role credential exists. M01–M08 objects verified
+unchanged: 11 tables, 1 view, 6 functions, 15 enums; `commit_import_batch`
+still `SECURITY DEFINER` / owner `postgres` / `search_path=""`;
+`current_holdings` present; `public.transactions` still 0 rows.
+
+Rollback: delete seeded aliases and securities only where no
+`public.transactions` row references them (SQL in the migration header), so a
+rollback can never remove an instrument a user's ledger depends on.
+
+Full report: `docs/migration-09a-review.md`.
