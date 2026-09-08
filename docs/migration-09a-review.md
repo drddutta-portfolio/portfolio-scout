@@ -1,8 +1,11 @@
-# Migration 09a — Security Master Seed (ARTIFACT FOR REVIEW — NOT APPLIED)
+# Migration 09a — Security Master Seed (DEPLOYED AND VERIFIED)
 
-Status: generated and dry-run verified against the dedicated Supabase project
-inside a transaction that was **rolled back**. Nothing was applied. Live counts
-after verification remain `securities = 0`, `security_aliases = 0`.
+Status: approved and applied to the dedicated Supabase project on
+2026-09-08 (UTC). Row counts immediately before deployment were
+`securities = 0`, `security_aliases = 0`; after deployment
+`securities = 6,114`, `security_aliases = 28,979`. Re-running the artifact
+inserts 0 rows (idempotent). Verification report: section 10.
+
 
 ## 1. Files
 
@@ -137,8 +140,67 @@ Documented in the SQL header: delete seeded aliases and securities only where
 no `public.transactions` row references them, so a rollback can never remove an
 instrument a user's ledger depends on.
 
-## 9. Awaiting your decision
+## 9. Approved data-quality decisions
 
-The two judgement calls worth your explicit sign-off before deployment:
-1. the 68 undetermined fund units seeded as `UNKNOWN`;
-2. the exclusion of BSE debt/CP/preference segments from Phase 1.
+Signed off by the owner on 2026-09-08 before deployment:
+1. No depository (NSDL/CDSL) or separate regulatory universe was used, because
+   no suitable freely usable authoritative dataset was available. The seed
+   rests on the verified official NSE and BSE source files listed in section 2
+   and nothing else; no unofficial substitute was introduced.
+2. The 68 exchange-listed fund units whose instrument type cannot be
+   established deterministically remain `asset_class = UNKNOWN`. They may only
+   be reclassified through a separately reviewed reference-data update backed
+   by authoritative evidence.
+3. The 58 ambiguous name/symbol collisions stay out of the seed. They were not
+   resolved by similarity, fuzzy matching, assumption or `ON CONFLICT`
+   behaviour, and remain in `db/seeds/0009a/conflicts.csv` for later curated
+   resolution.
+4. BSE debt, commercial paper and preference segments remain out of Phase 1
+   scope.
+
+## 10. Deployment verification (2026-09-08 UTC)
+
+Applied with `psql -v ON_ERROR_STOP=1` against the dedicated project:
+`BEGIN / INSERT 0 6114 / INSERT 0 28979 / COMMIT`.
+
+| Check | Expected | Actual |
+| --- | --- | --- |
+| securities before / after | 0 / 6,114 | 0 / 6,114 |
+| aliases before / after | 0 / 28,979 | 0 / 28,979 |
+| EQUITY | 5,445 | 5,445 |
+| SME subset (NSE Emerge) | 569 | 569 |
+| ETF | 574 | 574 |
+| REIT | 9 | 9 |
+| INVIT | 18 | 18 |
+| UNKNOWN | 68 | 68 |
+| withheld ambiguous aliases | 58 | 58 |
+| duplicate canonical ISIN | 0 | 0 |
+| duplicate exchange+symbol | 0 | 0 |
+| orphan alias rows | 0 | 0 |
+| aliases by type | ISIN 6,112 / EXCHANGE_SYMBOL 14,155 / COMPANY_NAME 8,712 | matched |
+| re-run of the artifact | 0 new rows | `INSERT 0 0` twice, counts unchanged |
+
+SME subset detail: 459 securities from NSE Emerge series SM/SZ plus 110 series
+ST rows carrying ordinary equity ISINs. Only the 2 ST rows whose ISIN
+instrument type marks them as rights entitlements were excluded.
+
+Security posture after deployment (unchanged from M04):
+- `authenticated`: `SELECT` only on `securities` and `security_aliases`.
+- `anon`: `has_table_privilege` false on both tables.
+- RLS enabled on both; exactly one SELECT policy each, `TO authenticated`.
+- No application service-role credential exists or was used; deployment ran as
+  the database owner over the direct connection, and no key was written to the
+  repository, environment or logs.
+
+M01–M08 unchanged: 11 tables, 1 view, 6 functions, 15 enums.
+`commit_import_batch` remains `SECURITY DEFINER`, owner `postgres`,
+`search_path=""`. `current_holdings` still present. `transactions` still 0 rows —
+no ledger data was created.
+
+Representative lookups, all successful:
+- NSE-only: `INE0J1Y01017` -> Life Insurance Corporation Of India, NSE/LICI, EQUITY.
+- Shared ISIN: `INE002A01018` -> one row, Reliance Industries Limited, NSE/RELIANCE,
+  with NSE symbol, BSE symbol, BSE scrip code 500325, both name spellings and the ISIN as aliases.
+- BSE-only: 2,625 securities with no NSE listing.
+- SME: Mangalam Alloys Limited, NSE/MAL, EQUITY.
+- UNKNOWN: iSIF Hybrid Long-Short Fund - Growth, `INF109K30018`, UNKNOWN.
