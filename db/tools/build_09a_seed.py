@@ -265,26 +265,41 @@ def build(input_dir: str, out_root: str) -> dict:
         valid.append(r)
 
     # ---- deterministic classification ----------------------------------------
-    for r in valid:
+    # ISINs that an exchange itself publishes on an ETF listing. Used to split the
+    # INF (fund) ISIN space into ETF vs. undetermined fund units.
+    etf_isins = {r["isin"] for r in valid if r["class_hint"] == "ETF" and r["isin"]}
+
+    def classify(r: dict) -> str:
         depository = isin_asset_class(r["isin"])
         hint = r["class_hint"]
+        ident = f"{r['exchange']}:{r['symbol'] or r['code']}"
+        if depository == "FUND":
+            if r["isin"] in etf_isins:
+                return "ETF"
+            rep.conflict(
+                "fund_unit_not_on_any_exchange_etf_list", ident,
+                f"isin={r['isin']} name={r['name'][:60]} -> UNKNOWN (ETF vs mutual-fund "
+                f"scheme not determinable from the sources)",
+            )
+            return "UNKNOWN"
         if depository is None:
-            r["asset_class"] = hint if hint != "UNKNOWN" else "UNKNOWN"
             if hint == "UNKNOWN":
                 rep.conflict(
-                    "unclassifiable_instrument",
-                    f"{r['exchange']}:{r['symbol'] or r['code']}",
+                    "unclassifiable_instrument", ident,
                     f"isin={r['isin'] or '(none)'} group={r['series']} -> UNKNOWN",
                 )
-            continue
-        r["asset_class"] = depository
+            return hint
         if hint not in ("UNKNOWN", depository):
-            rep.conflict(
-                "classification_disagreement",
-                f"{r['exchange']}:{r['symbol'] or r['code']}",
+            rep.note(
+                "classification_source_vs_depository", ident,
                 f"source_list={hint} depository_isin={depository} isin={r['isin']} "
                 f"-> depository evidence used",
             )
+        return depository
+
+    for r in valid:
+        r["asset_class"] = classify(r)
+
 
     # ---- canonical grouping ---------------------------------------------------
     by_isin: dict[str, list[dict]] = defaultdict(list)
