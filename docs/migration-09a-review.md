@@ -1,8 +1,11 @@
-# Migration 09a — Security Master Seed (ARTIFACT FOR REVIEW — NOT APPLIED)
+# Migration 09a — Security Master Seed (DEPLOYED AND VERIFIED)
 
-Status: generated and dry-run verified against the dedicated Supabase project
-inside a transaction that was **rolled back**. Nothing was applied. Live counts
-after verification remain `securities = 0`, `security_aliases = 0`.
+Status: approved and applied to the dedicated Supabase project on
+2026-09-08 (UTC). Row counts immediately before deployment were
+`securities = 0`, `security_aliases = 0`; after deployment
+`securities = 6,114`, `security_aliases = 28,979`. Re-running the artifact
+inserts 0 rows (idempotent). Verification report: section 10.
+
 
 ## 1. Files
 
