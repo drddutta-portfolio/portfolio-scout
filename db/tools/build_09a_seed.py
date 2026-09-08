@@ -323,18 +323,19 @@ def build(input_dir: str, out_root: str) -> dict:
                 "conflicting_class_same_isin", isin,
                 "|".join(sorted(f"{r['src']}={r['asset_class']}" for r in rows)),
             )
-        # depository evidence already applied per row; take the decisive one
-        dep = isin_asset_class(isin)
-        asset_class = dep or (next(iter(classes)) if len(classes) == 1 else "UNKNOWN")
+            asset_class = "UNKNOWN"
+        else:
+            asset_class = next(iter(classes))
 
         names = {r["name"] for r in rows}
         nse_names = [r["name"] for r in rows if r["exchange"] == "NSE"]
         name = sorted(nse_names)[0] if nse_names else sorted(names)[0]
         if len({normalize_alias(n) for n in names}) > 1:
-            rep.conflict(
-                "differing_names_same_isin", isin,
+            rep.note(
+                "name_variant_between_exchanges", isin,
                 " | ".join(sorted(names))[:300],
             )
+
 
         nse_sym = pick_symbol(rows, "NSE")
         bse_sym = pick_symbol(rows, "BSE")
