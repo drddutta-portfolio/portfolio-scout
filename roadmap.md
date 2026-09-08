@@ -59,6 +59,12 @@
       no service-role credential in the application.
       Deferred: role-change history and corporate-action modelling.
 
+## In progress
+- [ ] Migration 09a (security master seed) — ARTIFACT GENERATED AND DRY-RUN VERIFIED (rolled back), awaiting approval. See `docs/migration-09a-review.md`.
+      Build from authoritative NSE/BSE/depository sources, deterministic dedup + review report.
+
 ## Next (awaiting approval)
+- [ ] First Functional UI build (after M09a is reviewed, approved and deployed)
 - [ ] Migration 09 (corporate_actions) — NOT started
+
 

@@ -1,0 +1,38 @@
+{
+  "generated_utc": "2026-09-08T08:53:58Z",
+  "total_securities": 6114,
+  "by_asset_class": {
+    "EQUITY": 5445,
+    "ETF": 574,
+    "INVIT": 18,
+    "REIT": 9,
+    "UNKNOWN": 68
+  },
+  "sme_equities": 569,
+  "nse_only": 781,
+  "bse_only": 2625,
+  "nse_and_bse_shared_isin": 2708,
+  "missing_isin_securities": 2,
+  "securities_without_symbol": 0,
+  "total_aliases": 28979,
+  "aliases_by_type": {
+    "COMPANY_NAME": 8712,
+    "EXCHANGE_SYMBOL": 14155,
+    "ISIN": 6112
+  },
+  "excluded_records": 7421,
+  "exclusions_by_reason": {
+    "malformed_isin": 1,
+    "out_of_scope_segment": 7417,
+    "rights_entitlement_temporary_instrument": 3
+  },
+  "conflicts": 126,
+  "conflicts_by_kind": {
+    "conflicting_alias_same_context": 58,
+    "fund_unit_not_on_any_exchange_etf_list": 68
+  },
+  "notes": 2689,
+  "notes_by_kind": {
+    "name_variant_between_exchanges": 2689
+  }
+}
