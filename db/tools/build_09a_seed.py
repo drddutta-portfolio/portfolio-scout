@@ -471,7 +471,10 @@ def build(input_dir: str, out_root: str) -> dict:
         "exclusions_by_reason": dict(sorted(Counter(e["reason"] for e in rep.exclusions).items())),
         "conflicts": len(rep.conflicts),
         "conflicts_by_kind": dict(sorted(Counter(c["kind"] for c in rep.conflicts).items())),
+        "notes": len(rep.notes),
+        "notes_by_kind": dict(sorted(Counter(n["kind"] for n in rep.notes).items())),
     }
+
 
     # ---- output ---------------------------------------------------------------
     seeds = os.path.join(out_root, "db", "seeds", "0009a")
