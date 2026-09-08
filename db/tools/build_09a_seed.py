@@ -493,6 +493,11 @@ def build(input_dir: str, out_root: str) -> dict:
         w = csv.DictWriter(fh, fieldnames=["kind", "identifier", "detail"])
         w.writeheader()
         w.writerows(rep.conflicts)
+    with open(os.path.join(seeds, "notes.csv"), "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["kind", "identifier", "detail"])
+        w.writeheader()
+        w.writerows(rep.notes)
+
 
     write_sql(os.path.join(out_root, "db", "migrations", "0009a_security_master_seed.sql"),
               securities, aliases, manifest, stats)
