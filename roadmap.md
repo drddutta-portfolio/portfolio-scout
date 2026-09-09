@@ -68,3 +68,11 @@
 - [ ] Migration 09 (corporate_actions) — NOT started
 
 
+
+## First Functional UI (built)
+- Sign in / forgot password / reset password (Supabase Auth; accounts created manually).
+- Protected app shell: Dashboard, Holdings, Import, Settings.
+- Import: browser CSV/XLSX/XLS parsing, SHA-256, column mapping, M06 staging.
+- Review workspace: deterministic suggestions requiring explicit confirmation, explicit broker account, exclusions, commit via public.commit_import_batch.
+- Holdings from current_holdings with UNAVAILABLE disclosure and role assignment.
+- No prices, valuation, weights, cost basis or P&L in this milestone.
