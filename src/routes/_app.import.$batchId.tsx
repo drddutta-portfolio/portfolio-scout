@@ -13,13 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  ErrorState,
-  IssueBadges,
-  LoadingState,
-  PageHeader,
-  StatusBadge,
-} from "@/components/state";
+import { ErrorState, IssueBadges, LoadingState, PageHeader, StatusBadge } from "@/components/state";
 import { BrokerAccountsPanel } from "@/routes/_app.settings";
 import {
   evaluateRow,
@@ -93,7 +87,6 @@ function BatchPage() {
   /** Rows where the user picked an account by hand; never overwritten silently. */
   const [explicitAccounts, setExplicitAccounts] = useState<Record<string, true>>({});
   const [brokerMap, setBrokerMap] = useState<Record<string, string>>({});
-
 
   const batchQuery = useQuery({
     queryKey: ["batch", batchId],
@@ -228,9 +221,10 @@ function BatchPage() {
     }
     return Array.from(map.entries())
       .map(([key, value]) => ({ key, ...value }))
-      .sort((a, b) => (a.key === BLANK_BROKER ? 1 : b.key === BLANK_BROKER ? -1 : a.label.localeCompare(b.label)));
+      .sort((a, b) =>
+        a.key === BLANK_BROKER ? 1 : b.key === BLANK_BROKER ? -1 : a.label.localeCompare(b.label),
+      );
   }, [derived]);
-
 
   const save = useMutation({
     mutationFn: async () => {
@@ -260,9 +254,10 @@ function BatchPage() {
             };
             // A row that is complete apart from an unknown date is stored as
             // RESOLVED + INCOMPLETE + MISSING_DATE. The date is never invented.
-            const resolvedQuality = verdict.issues.length === 0
-              ? { data_quality_state: "VALID", data_quality_issues: [] as string[] }
-              : { data_quality_state: "INCOMPLETE", data_quality_issues: ["MISSING_DATE"] };
+            const resolvedQuality =
+              verdict.issues.length === 0
+                ? { data_quality_state: "VALID", data_quality_issues: [] as string[] }
+                : { data_quality_state: "INCOMPLETE", data_quality_issues: ["MISSING_DATE"] };
             const payload = choice.excluded
               ? {
                   ...base,
@@ -346,7 +341,8 @@ function BatchPage() {
     onError: (err: Error) => toast.error(err.message),
   });
 
-  if (batchQuery.isLoading || rowsQuery.isLoading) return <LoadingState label="Loading the batch" />;
+  if (batchQuery.isLoading || rowsQuery.isLoading)
+    return <LoadingState label="Loading the batch" />;
   if (batchQuery.error) return <ErrorState error={batchQuery.error} />;
   if (rowsQuery.error) return <ErrorState error={rowsQuery.error} />;
   if (!batch) return <ErrorState error="Batch not found" />;
@@ -419,7 +415,6 @@ function BatchPage() {
     );
   }
 
-
   /** Sets aside every row that is not complete, so the rest can be committed. */
   function excludeBlocked() {
     setChoices((prev) => {
@@ -435,8 +430,6 @@ function BatchPage() {
       return next;
     });
   }
-
-
 
   return (
     <>
@@ -520,9 +513,7 @@ function BatchPage() {
           </p>
           <div className="mt-3 space-y-2">
             {brokerGroups.map((group) => {
-              const assigned = group.rowIds.filter(
-                (id) => choices[id]?.brokerAccountId,
-              ).length;
+              const assigned = group.rowIds.filter((id) => choices[id]?.brokerAccountId).length;
               return (
                 <div key={group.key} className="flex flex-wrap items-center gap-3">
                   <span className="w-52 truncate text-sm text-foreground">
@@ -578,8 +569,6 @@ function BatchPage() {
           </div>
         </section>
       ) : null}
-
-
 
       {showAccounts ? (
         <div className="mb-4">
@@ -801,7 +790,6 @@ function Reconciliation({ batchId, portfolioId }: { batchId: string; portfolioId
     },
   });
 
-
   if (!claims || claims.length === 0) return null;
 
   return (
@@ -809,7 +797,8 @@ function Reconciliation({ batchId, portfolioId }: { batchId: string; portfolioId
       <h2 className="text-sm font-semibold text-foreground">Comparison with the holdings sheet</h2>
       <p className="mt-1 text-xs text-muted-foreground">
         The sheet's own unit counts next to the units derived from your committed transactions. The
-        derived figure is the accounting truth; a difference means the sheet and the ledger disagree.
+        derived figure is the accounting truth; a difference means the sheet and the ledger
+        disagree.
       </p>
       {holdings.isLoading ? <LoadingState label="Comparing" /> : null}
       {holdings.error ? <ErrorState error={holdings.error} /> : null}
@@ -862,7 +851,6 @@ function Reconciliation({ batchId, portfolioId }: { batchId: string; portfolioId
                   </tr>
                 );
               })}
-
             </tbody>
           </table>
         </div>

@@ -41,7 +41,17 @@ export const MAPPABLE_FIELDS: { field: MappableField; label: string; hint?: stri
 ];
 
 const HEADER_HINTS: Record<MappableField, string[]> = {
-  security_text: ["ticker", "security", "symbol", "scrip", "instrument", "stock", "tradingsymbol", "company", "name"],
+  security_text: [
+    "ticker",
+    "security",
+    "symbol",
+    "scrip",
+    "instrument",
+    "stock",
+    "tradingsymbol",
+    "company",
+    "name",
+  ],
   isin: ["isin"],
   exchange: ["exchange", "exch"],
   broker_text: ["broker", "institution", "member"],
@@ -49,7 +59,16 @@ const HEADER_HINTS: Record<MappableField, string[]> = {
   txn_type: ["type", "transaction", "side", "buy/sell", "action", "trade type"],
   date: ["date", "trade date", "transaction date", "settlement date"],
   quantity: ["net units", "quantity", "qty", "units", "shares"],
-  unit_price: ["avg. buy price", "avg buy price", "average price", "buy price", "unit price", "avg price", "price", "rate"],
+  unit_price: [
+    "avg. buy price",
+    "avg buy price",
+    "average price",
+    "buy price",
+    "unit price",
+    "avg price",
+    "price",
+    "rate",
+  ],
   gross_amount: ["invested value", "gross", "consideration", "net amount", "amount", "value"],
   total_charges: ["charge", "brokerage", "fees", "tax", "stt"],
 
@@ -141,7 +160,7 @@ const TXN_ALIASES: Record<string, TxnType> = {
   holding: "OPENING_POSITION",
   "transfer in": "TRANSFER_IN",
   transfer_in: "TRANSFER_IN",
-  "in": "TRANSFER_IN",
+  in: "TRANSFER_IN",
   "transfer out": "TRANSFER_OUT",
   transfer_out: "TRANSFER_OUT",
   out: "TRANSFER_OUT",
@@ -248,8 +267,11 @@ export function evaluateRow(facts: RowFacts, options: EvaluateOptions = {}): Row
   }
 
   const unique = Array.from(new Set(issues));
-  const missingBrokerOnlyNote = unique.filter((i) => i !== "MISSING_BROKER" && i !== "MISSING_DATE");
-  const missingDateOnly = !facts.tradeDate && otherBlocking === 0 && missingBrokerOnlyNote.length === 0;
+  const missingBrokerOnlyNote = unique.filter(
+    (i) => i !== "MISSING_BROKER" && i !== "MISSING_DATE",
+  );
+  const missingDateOnly =
+    !facts.tradeDate && otherBlocking === 0 && missingBrokerOnlyNote.length === 0;
   const ready = otherBlocking === 0 && (facts.tradeDate !== null || allowMissingDate);
   return {
     issues: unique,
@@ -260,9 +282,11 @@ export function evaluateRow(facts: RowFacts, options: EvaluateOptions = {}): Row
   };
 }
 
-
 export function fingerprint(parts: (string | null)[]): string {
-  return parts.map((p) => (p ?? "~").toString().toUpperCase()).join("|").slice(0, 200);
+  return parts
+    .map((p) => (p ?? "~").toString().toUpperCase())
+    .join("|")
+    .slice(0, 200);
 }
 
 /* ------------------------------------------------------------------ */
