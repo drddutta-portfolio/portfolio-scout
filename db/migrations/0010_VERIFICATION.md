@@ -45,16 +45,22 @@ then `rollback`.
 
 ## Rollback rehearsal
 
-Before rolling back, confirm no dateless committed lineage exists:
+Before restoring the old M06 staging rule, confirm no currently RESOLVED staging
+row relies on the relaxed NULL-date rule:
 
 ```sql
-select count(*) from public.transactions
- where trade_date is null and import_source_row_id is not null;
+select count(*)
+  from public.import_source_rows
+ where resolution = 'RESOLVED'
+   and candidate_trade_date is null;
 ```
 
 Only if that is `0`, apply the rollback block documented at the head of the
 migration and restore `commit_import_batch` verbatim from
 `db/migrations/0007_commit_import_batch.sql`.
+
+Already COMMITTED canonical transactions with `trade_date is null` are legal
+under M05 and do not themselves prevent rollback of the staging/commit rule.
 
 ## Application-side gate
 
