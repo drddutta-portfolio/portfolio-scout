@@ -41,17 +41,18 @@ export const MAPPABLE_FIELDS: { field: MappableField; label: string; hint?: stri
 ];
 
 const HEADER_HINTS: Record<MappableField, string[]> = {
-  security_text: ["security", "symbol", "scrip", "instrument", "stock", "name", "tradingsymbol"],
+  security_text: ["ticker", "security", "symbol", "scrip", "instrument", "stock", "tradingsymbol", "company", "name"],
   isin: ["isin"],
   exchange: ["exchange", "exch"],
   broker_text: ["broker", "institution", "member"],
   account_text: ["account", "client id", "clientid", "demat", "dp id"],
   txn_type: ["type", "transaction", "side", "buy/sell", "action", "trade type"],
   date: ["date", "trade date", "transaction date", "settlement date"],
-  quantity: ["quantity", "qty", "units", "shares"],
-  unit_price: ["price", "rate", "unit price", "avg price"],
-  gross_amount: ["gross", "amount", "value", "consideration", "net amount"],
+  quantity: ["net units", "quantity", "qty", "units", "shares"],
+  unit_price: ["avg. buy price", "avg buy price", "average price", "buy price", "unit price", "avg price", "price", "rate"],
+  gross_amount: ["invested value", "gross", "consideration", "net amount", "amount", "value"],
   total_charges: ["charge", "brokerage", "fees", "tax", "stt"],
+
   currency: ["currency", "ccy"],
   source_reference: ["reference", "order id", "trade id", "contract", "ref"],
 };
