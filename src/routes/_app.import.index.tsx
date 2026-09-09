@@ -52,6 +52,8 @@ function ImportPage() {
   const [mapping, setMapping] = useState<Partial<Record<MappableField, number>>>({});
   const [parseError, setParseError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [snapshotType, setSnapshotType] = useState<TxnType | "">("");
+  const [snapshotDate, setSnapshotDate] = useState("");
 
   const batches = useQuery({
     queryKey: ["batches", activePortfolio?.id],
