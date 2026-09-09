@@ -17,6 +17,7 @@ import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppHoldingsRouteImport } from './routes/_app.holdings'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
+import { Route as AppTransactionsRouteImport } from './routes/_app.transactions'
 import { Route as AppImportIndexRouteImport } from './routes/_app.import.index'
 import { Route as AppImportBatchIdRouteImport } from './routes/_app.import.$batchId'
 
@@ -59,6 +60,11 @@ const AppSettingsRoute = AppSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AppRoute,
 } as any)
+const AppTransactionsRoute = AppTransactionsRouteImport.update({
+  id: '/transactions',
+  path: '/transactions',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppImportIndexRoute = AppImportIndexRouteImport.update({
   id: '/import/',
   path: '/import/',
@@ -78,6 +84,7 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof AppDashboardRoute
   '/holdings': typeof AppHoldingsRoute
   '/settings': typeof AppSettingsRoute
+  '/transactions': typeof AppTransactionsRoute
   '/import/$batchId': typeof AppImportBatchIdRoute
   '/import/': typeof AppImportIndexRoute
 }
@@ -89,6 +96,7 @@ export interface FileRoutesByTo {
   '/dashboard': typeof AppDashboardRoute
   '/holdings': typeof AppHoldingsRoute
   '/settings': typeof AppSettingsRoute
+  '/transactions': typeof AppTransactionsRoute
   '/import/$batchId': typeof AppImportBatchIdRoute
   '/import': typeof AppImportIndexRoute
 }
@@ -102,6 +110,7 @@ export interface FileRoutesById {
   '/_app/dashboard': typeof AppDashboardRoute
   '/_app/holdings': typeof AppHoldingsRoute
   '/_app/settings': typeof AppSettingsRoute
+  '/_app/transactions': typeof AppTransactionsRoute
   '/_app/import/$batchId': typeof AppImportBatchIdRoute
   '/_app/import/': typeof AppImportIndexRoute
 }
@@ -115,6 +124,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/holdings'
     | '/settings'
+    | '/transactions'
     | '/import/$batchId'
     | '/import/'
   fileRoutesByTo: FileRoutesByTo
@@ -126,6 +136,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/holdings'
     | '/settings'
+    | '/transactions'
     | '/import/$batchId'
     | '/import'
   id:
@@ -138,6 +149,7 @@ export interface FileRouteTypes {
     | '/_app/dashboard'
     | '/_app/holdings'
     | '/_app/settings'
+    | '/_app/transactions'
     | '/_app/import/$batchId'
     | '/_app/import/'
   fileRoutesById: FileRoutesById
@@ -208,6 +220,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/transactions': {
+      id: '/_app/transactions'
+      path: '/transactions'
+      fullPath: '/transactions'
+      preLoaderRoute: typeof AppTransactionsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/import/': {
       id: '/_app/import/'
       path: '/import'
@@ -229,6 +248,7 @@ interface AppRouteChildren {
   AppDashboardRoute: typeof AppDashboardRoute
   AppHoldingsRoute: typeof AppHoldingsRoute
   AppSettingsRoute: typeof AppSettingsRoute
+  AppTransactionsRoute: typeof AppTransactionsRoute
   AppImportBatchIdRoute: typeof AppImportBatchIdRoute
   AppImportIndexRoute: typeof AppImportIndexRoute
 }
@@ -237,6 +257,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppDashboardRoute: AppDashboardRoute,
   AppHoldingsRoute: AppHoldingsRoute,
   AppSettingsRoute: AppSettingsRoute,
+  AppTransactionsRoute: AppTransactionsRoute,
   AppImportBatchIdRoute: AppImportBatchIdRoute,
   AppImportIndexRoute: AppImportIndexRoute,
 }
