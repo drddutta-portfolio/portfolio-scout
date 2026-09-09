@@ -16,7 +16,7 @@ import { EmptyState, ErrorState, LoadingState, PageHeader, StatusBadge } from "@
 import { MAPPABLE_FIELDS, guessMapping, type MappableField } from "@/lib/import-logic";
 import { parseSpreadsheet, type ParsedFile } from "@/lib/parse-file";
 import { chunks } from "@/lib/security-resolution";
-import type { ImportBatch } from "@/lib/types";
+import { SUPPORTED_TXN_TYPES, type ImportBatch, type TxnType } from "@/lib/types";
 import { useAuth, useSupabase } from "@/providers/auth";
 import { usePortfolios } from "@/providers/portfolio";
 
@@ -52,6 +52,8 @@ function ImportPage() {
   const [mapping, setMapping] = useState<Partial<Record<MappableField, number>>>({});
   const [parseError, setParseError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [snapshotType, setSnapshotType] = useState<TxnType | "">("");
+  const [snapshotDate, setSnapshotDate] = useState("");
 
   const batches = useQuery({
     queryKey: ["batches", activePortfolio?.id],
@@ -127,8 +129,8 @@ function ImportPage() {
           raw_isin: pick(row, "isin"),
           raw_broker_text: pick(row, "broker_text"),
           raw_account_text: pick(row, "account_text"),
-          raw_txn_type: pick(row, "txn_type"),
-          raw_date: pick(row, "date"),
+          raw_txn_type: pick(row, "txn_type") ?? (snapshotType === "" ? null : snapshotType),
+          raw_date: pick(row, "date") ?? (snapshotDate === "" ? null : snapshotDate),
           raw_quantity: pick(row, "quantity"),
           raw_unit_price: pick(row, "unit_price"),
           raw_gross_amount: pick(row, "gross_amount"),
@@ -171,11 +173,14 @@ function ImportPage() {
     );
   }
 
+  const hasType = mapping.txn_type !== undefined || snapshotType !== "";
+  const hasDate = mapping.date !== undefined || snapshotDate !== "";
+
   const canStage = Boolean(
     parsed &&
       mapping.security_text !== undefined &&
-      mapping.txn_type !== undefined &&
-      mapping.date !== undefined &&
+      hasType &&
+      hasDate &&
       mapping.quantity !== undefined,
   );
 
@@ -252,6 +257,55 @@ function ImportPage() {
               </div>
             </section>
 
+            {mapping.txn_type === undefined || mapping.date === undefined ? (
+              <section className="rounded-lg border border-border bg-card p-5">
+                <h2 className="text-sm font-semibold text-foreground">
+                  2b. Snapshot values for the whole file
+                </h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  This file has no transaction type and/or trade date per row. Choose them yourself
+                  and they will be applied to every row exactly as entered. Nothing is guessed.
+                </p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  {mapping.txn_type === undefined ? (
+                    <div className="space-y-1.5">
+                      <Label>Transaction type for all rows</Label>
+                      <Select
+                        value={snapshotType === "" ? NONE : snapshotType}
+                        onValueChange={(value) =>
+                          setSnapshotType(value === NONE ? "" : (value as TxnType))
+                        }
+                      >
+                        <SelectTrigger className="h-9">
+                          <SelectValue placeholder="Choose a type" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NONE}>Leave empty</SelectItem>
+                          {SUPPORTED_TXN_TYPES.map((type) => (
+                            <SelectItem key={type} value={type}>
+                              {type}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ) : null}
+                  {mapping.date === undefined ? (
+                    <div className="space-y-1.5">
+                      <Label htmlFor="snapshot-date">Date for all rows</Label>
+                      <input
+                        id="snapshot-date"
+                        type="date"
+                        value={snapshotDate}
+                        onChange={(event) => setSnapshotDate(event.target.value)}
+                        className="h-9 w-full rounded border border-border bg-background px-2 text-sm"
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+            ) : null}
+
             <section className="rounded-lg border border-border bg-card p-5">
               <h2 className="text-sm font-semibold text-foreground">3. Preview</h2>
               <div className="mt-3 overflow-x-auto rounded border border-border">
@@ -284,7 +338,8 @@ function ImportPage() {
                 </Button>
                 {!canStage ? (
                   <p className="text-xs text-muted-foreground">
-                    Map at least security, transaction type, trade date and quantity.
+                    Provide security, quantity, and a transaction type and trade date — either
+                    mapped from the file or chosen above for the whole file.
                   </p>
                 ) : null}
               </div>
