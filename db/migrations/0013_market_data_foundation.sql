@@ -3,38 +3,20 @@
 --
 -- PREPARED FOR REVIEW. Apply only after review/approval.
 --
--- Purpose
---   Add provider/security mappings, latest quote cache, EOD history, refresh
---   audit records, mapping-change quarantine, and operation leases.
---
 -- Invariants
---   * public.transactions remains accounting truth.
---   * public.current_holdings remains quantity truth.
---   * Market data is observation/provenance data only; it never mutates ledger facts.
---   * Browser has SELECT-only access to shared market observations/mappings.
---   * Provider writes occur only server-side through the Edge Function/service role.
---   * No API credential/token is stored in any table.
---   * No trading/order execution objects are introduced.
+--   * transactions/current_holdings remain accounting/quantity truth.
+--   * market data is provider observation data only; it never mutates ledger facts.
+--   * browser access is SELECT-only; provider writes are server-side/service-role.
+--   * no Angel One credential, JWT, refresh token, feed token, PIN or TOTP is stored.
+--   * no trading/order execution objects are introduced.
 --
--- Rollback (only before application code depends on M13):
---   begin;
---   drop function if exists public.release_market_data_operation_lease(uuid,text,text,uuid,integer);
---   drop function if exists public.acquire_market_data_operation_lease(uuid,text,text,uuid,integer);
---   drop table if exists public.market_data_operation_leases;
---   drop table if exists public.market_data_refresh_runs;
---   drop table if exists public.market_data_mapping_reviews;
---   drop table if exists public.market_price_history_eod;
---   drop table if exists public.market_price_latest;
---   drop table if exists public.market_data_instrument_mappings;
---   commit;
---   Never use CASCADE.
+-- Rollback before application dependency only (never CASCADE): drop the two lease
+-- functions, then operation_leases, refresh_runs, mapping_reviews,
+-- market_price_history_eod, market_price_latest, market_data_instrument_mappings.
 
 begin;
 
--- ---------------------------------------------------------------------------
--- 1. Provider instrument identity
--- ---------------------------------------------------------------------------
-
+-- 1. Canonical security -> provider instrument identity.
 create table public.market_data_instrument_mappings (
   id                       uuid primary key default gen_random_uuid(),
   security_id              uuid not null references public.securities(id) on delete restrict,
@@ -51,21 +33,19 @@ create table public.market_data_instrument_mappings (
   created_at               timestamptz not null default now(),
   updated_at               timestamptz not null default now(),
 
-  constraint mdim_provider_code_ck check (provider_code in ('ANGEL_ONE')),
+  constraint mdim_provider_code_ck check (provider_code = 'ANGEL_ONE'),
   constraint mdim_mapping_status_ck check (mapping_status in ('VERIFIED','UNRESOLVED','AMBIGUOUS')),
-  constraint mdim_match_basis_ck check (match_basis is null or match_basis in ('EXCHANGE_SYMBOL_EXACT')),
+  constraint mdim_match_basis_ck check (match_basis is null or match_basis = 'EXCHANGE_SYMBOL_EXACT'),
   constraint mdim_exchange_ck check (exchange is null or exchange in ('NSE','BSE')),
   constraint mdim_verified_shape_ck check (
-    mapping_status <> 'VERIFIED'
-    or (
-      provider_instrument_id is not null
-      and exchange is not null
-      and trading_symbol is not null
-      and match_basis is not null
+    mapping_status <> 'VERIFIED' or (
+      provider_instrument_id is not null and exchange is not null
+      and trading_symbol is not null and match_basis is not null
       and verified_at is not null
     )
   ),
-  constraint mdim_unique_security_provider unique (security_id, provider_code)
+  constraint mdim_unique_security_provider unique (security_id, provider_code),
+  constraint mdim_id_security_provider_key unique (id, security_id, provider_code)
 );
 
 create index mdim_provider_status_idx
@@ -79,26 +59,22 @@ before update on public.market_data_instrument_mappings
 for each row execute function public.set_updated_at();
 
 comment on table public.market_data_instrument_mappings is
-  'Canonical security to market-data provider instrument mapping. Shared reference data; server-written, authenticated read-only.';
+  'Shared canonical security-to-provider mapping. Exact mapping evidence retained; server-written, authenticated read-only.';
 
 revoke all on public.market_data_instrument_mappings from public;
 revoke all on public.market_data_instrument_mappings from anon, authenticated;
 grant select on public.market_data_instrument_mappings to authenticated;
 grant all on public.market_data_instrument_mappings to service_role;
-
 alter table public.market_data_instrument_mappings enable row level security;
 create policy mdim_authenticated_read on public.market_data_instrument_mappings
   for select to authenticated using (true);
 
--- ---------------------------------------------------------------------------
--- 2. Latest quote cache (FULL quote subset useful to investment workflows)
--- ---------------------------------------------------------------------------
-
+-- 2. Latest cached FULL quote subset.
 create table public.market_price_latest (
   id                    uuid primary key default gen_random_uuid(),
   security_id           uuid not null references public.securities(id) on delete restrict,
   provider_code         text not null,
-  mapping_id            uuid not null references public.market_data_instrument_mappings(id) on delete restrict,
+  mapping_id            uuid not null,
   price                 numeric(38,18) not null,
   currency              text not null default 'INR',
   price_timestamp       timestamptz,
@@ -122,10 +98,10 @@ create table public.market_price_latest (
   created_at            timestamptz not null default now(),
   updated_at            timestamptz not null default now(),
 
-  constraint mpl_provider_code_ck check (provider_code in ('ANGEL_ONE')),
+  constraint mpl_provider_code_ck check (provider_code = 'ANGEL_ONE'),
   constraint mpl_currency_ck check (currency ~ '^[A-Z]{3}$'),
   constraint mpl_session_ck check (market_session_status in ('OPEN','CLOSED','PRE_OPEN','POST_CLOSE','UNKNOWN')),
-  constraint mpl_price_positive_ck check (price >= 0),
+  constraint mpl_price_nonnegative_ck check (price >= 0),
   constraint mpl_unique_security_provider unique (security_id, provider_code),
   constraint mpl_mapping_provider_security_fk
     foreign key (mapping_id, security_id, provider_code)
@@ -133,53 +109,43 @@ create table public.market_price_latest (
     on delete restrict
 );
 
--- Required by the composite FK above; id remains the primary identity.
-alter table public.market_data_instrument_mappings
-  add constraint mdim_id_security_provider_key unique (id, security_id, provider_code);
-
-create index mpl_retrieved_idx on public.market_price_latest(provider_code, retrieved_at desc);
-
+create index mpl_retrieved_idx
+  on public.market_price_latest(provider_code, retrieved_at desc);
 create trigger market_price_latest_set_updated_at
 before update on public.market_price_latest
 for each row execute function public.set_updated_at();
 
 comment on table public.market_price_latest is
-  'Latest cached provider quote. Observation only; not accounting truth. Includes selected Angel One FULL quote fields.';
+  'Latest provider quote cache. Observation only; never accounting truth. Stores useful Angel One FULL quote fields.';
 
 revoke all on public.market_price_latest from public;
 revoke all on public.market_price_latest from anon, authenticated;
 grant select on public.market_price_latest to authenticated;
 grant all on public.market_price_latest to service_role;
-
 alter table public.market_price_latest enable row level security;
 create policy mpl_authenticated_read on public.market_price_latest
   for select to authenticated using (true);
 
--- ---------------------------------------------------------------------------
--- 3. Daily OHLCV history for deterministic momentum/market engines
--- ---------------------------------------------------------------------------
-
+-- 3. Daily OHLCV history for later deterministic momentum/market engines.
 create table public.market_price_history_eod (
-  id             uuid primary key default gen_random_uuid(),
-  security_id    uuid not null references public.securities(id) on delete restrict,
-  provider_code  text not null,
-  mapping_id     uuid not null references public.market_data_instrument_mappings(id) on delete restrict,
-  trade_date     date not null,
-  open_price     numeric(38,18) not null,
-  high_price     numeric(38,18) not null,
-  low_price      numeric(38,18) not null,
-  close_price    numeric(38,18) not null,
-  volume         numeric(38,0),
-  currency       text not null default 'INR',
-  retrieved_at   timestamptz not null default now(),
-  provenance     jsonb not null default '{}'::jsonb,
-  created_at     timestamptz not null default now(),
+  id            uuid primary key default gen_random_uuid(),
+  security_id   uuid not null references public.securities(id) on delete restrict,
+  provider_code text not null,
+  mapping_id    uuid not null,
+  trade_date    date not null,
+  open_price    numeric(38,18) not null,
+  high_price    numeric(38,18) not null,
+  low_price     numeric(38,18) not null,
+  close_price   numeric(38,18) not null,
+  volume        numeric(38,0),
+  currency      text not null default 'INR',
+  retrieved_at  timestamptz not null default now(),
+  provenance    jsonb not null default '{}'::jsonb,
+  created_at    timestamptz not null default now(),
 
-  constraint mphe_provider_code_ck check (provider_code in ('ANGEL_ONE')),
+  constraint mphe_provider_code_ck check (provider_code = 'ANGEL_ONE'),
   constraint mphe_currency_ck check (currency ~ '^[A-Z]{3}$'),
-  constraint mphe_ohlc_nonnegative_ck check (
-    open_price >= 0 and high_price >= 0 and low_price >= 0 and close_price >= 0
-  ),
+  constraint mphe_ohlc_nonnegative_ck check (open_price >= 0 and high_price >= 0 and low_price >= 0 and close_price >= 0),
   constraint mphe_range_ck check (high_price >= low_price),
   constraint mphe_volume_ck check (volume is null or volume >= 0),
   constraint mphe_unique_day unique (security_id, provider_code, trade_date),
@@ -189,27 +155,21 @@ create table public.market_price_history_eod (
     on delete restrict
 );
 
-create index mphe_security_date_idx
-  on public.market_price_history_eod(security_id, trade_date desc);
-create index mphe_provider_date_idx
-  on public.market_price_history_eod(provider_code, trade_date desc);
+create index mphe_security_date_idx on public.market_price_history_eod(security_id, trade_date desc);
+create index mphe_provider_date_idx on public.market_price_history_eod(provider_code, trade_date desc);
 
 comment on table public.market_price_history_eod is
-  'Provider-sourced daily OHLCV observations for deterministic investment analysis. Append/upsert by provider+security+date; never a transaction ledger.';
+  'Provider-sourced daily OHLCV observations. Designed for deterministic investment analysis, not intraday trading.';
 
 revoke all on public.market_price_history_eod from public;
 revoke all on public.market_price_history_eod from anon, authenticated;
 grant select on public.market_price_history_eod to authenticated;
 grant all on public.market_price_history_eod to service_role;
-
 alter table public.market_price_history_eod enable row level security;
 create policy mphe_authenticated_read on public.market_price_history_eod
   for select to authenticated using (true);
 
--- ---------------------------------------------------------------------------
--- 4. Mapping-change quarantine/audit (server only)
--- ---------------------------------------------------------------------------
-
+-- 4. Quarantine verified mapping identity changes instead of silently replacing them.
 create table public.market_data_mapping_reviews (
   id                                uuid primary key default gen_random_uuid(),
   mapping_id                        uuid not null references public.market_data_instrument_mappings(id) on delete restrict,
@@ -227,48 +187,41 @@ create table public.market_data_mapping_reviews (
   reviewed_at                       timestamptz,
   created_at                        timestamptz not null default now(),
 
-  constraint mdmr_provider_ck check (provider_code in ('ANGEL_ONE')),
+  constraint mdmr_provider_ck check (provider_code = 'ANGEL_ONE'),
   constraint mdmr_mapping_status_ck check (proposed_mapping_status in ('VERIFIED','UNRESOLVED','AMBIGUOUS')),
   constraint mdmr_review_status_ck check (review_status in ('PENDING','ACCEPTED','REJECTED'))
 );
-
 create unique index mdmr_one_pending_per_mapping
-  on public.market_data_mapping_reviews(mapping_id)
-  where review_status = 'PENDING';
+  on public.market_data_mapping_reviews(mapping_id) where review_status = 'PENDING';
 
 revoke all on public.market_data_mapping_reviews from public;
 revoke all on public.market_data_mapping_reviews from anon, authenticated;
 grant all on public.market_data_mapping_reviews to service_role;
-
 alter table public.market_data_mapping_reviews enable row level security;
--- No browser policy: operational server-only table.
+-- Deliberately no browser policy.
 
--- ---------------------------------------------------------------------------
--- 5. User-visible refresh audit; server writes, owner reads
--- ---------------------------------------------------------------------------
-
+-- 5. Refresh audit: owner-readable, server-written.
 create table public.market_data_refresh_runs (
-  id                         uuid primary key default gen_random_uuid(),
-  owner_id                   uuid not null references public.profiles(id) on delete restrict,
-  portfolio_id               uuid not null,
-  provider_code              text not null,
-  operation                  text not null,
-  requested_by               uuid not null references public.profiles(id) on delete restrict,
-  status                     text not null,
-  requested_security_count   integer not null default 0,
-  cached_security_count      integer not null default 0,
-  unresolved_security_count  integer not null default 0,
-  fetched_security_count     integer not null default 0,
-  failed_security_count      integer not null default 0,
-  started_at                 timestamptz not null default now(),
-  completed_at               timestamptz,
-  error_summary              text,
-  created_at                 timestamptz not null default now(),
+  id                        uuid primary key default gen_random_uuid(),
+  owner_id                  uuid not null references public.profiles(id) on delete restrict,
+  portfolio_id              uuid not null,
+  provider_code             text not null,
+  operation                 text not null,
+  requested_by              uuid not null references public.profiles(id) on delete restrict,
+  status                    text not null,
+  requested_security_count  integer not null default 0,
+  cached_security_count     integer not null default 0,
+  unresolved_security_count integer not null default 0,
+  fetched_security_count    integer not null default 0,
+  failed_security_count     integer not null default 0,
+  started_at                timestamptz not null default now(),
+  completed_at              timestamptz,
+  error_summary             text,
+  created_at                timestamptz not null default now(),
 
-  constraint mdrr_portfolio_owner_fk
-    foreign key (owner_id, portfolio_id)
+  constraint mdrr_portfolio_owner_fk foreign key (owner_id, portfolio_id)
     references public.portfolios(owner_id, id) on delete restrict,
-  constraint mdrr_provider_ck check (provider_code in ('ANGEL_ONE')),
+  constraint mdrr_provider_ck check (provider_code = 'ANGEL_ONE'),
   constraint mdrr_operation_ck check (operation in ('SYNC_MAPPINGS','REFRESH_PRICES','BACKFILL_EOD')),
   constraint mdrr_status_ck check (status in ('RUNNING','SUCCEEDED','PARTIAL','FAILED','SKIPPED_FRESH')),
   constraint mdrr_counts_ck check (
@@ -277,7 +230,6 @@ create table public.market_data_refresh_runs (
     and failed_security_count >= 0
   )
 );
-
 create index mdrr_owner_portfolio_started_idx
   on public.market_data_refresh_runs(owner_id, portfolio_id, started_at desc);
 
@@ -285,15 +237,11 @@ revoke all on public.market_data_refresh_runs from public;
 revoke all on public.market_data_refresh_runs from anon, authenticated;
 grant select on public.market_data_refresh_runs to authenticated;
 grant all on public.market_data_refresh_runs to service_role;
-
 alter table public.market_data_refresh_runs enable row level security;
 create policy mdrr_select_own on public.market_data_refresh_runs
   for select to authenticated using (owner_id = auth.uid());
 
--- ---------------------------------------------------------------------------
--- 6. Server-only lease/cooldown state
--- ---------------------------------------------------------------------------
-
+-- 6. Server-only lease/cooldown state.
 create table public.market_data_operation_leases (
   portfolio_id     uuid not null references public.portfolios(id) on delete restrict,
   provider_code    text not null,
@@ -303,18 +251,16 @@ create table public.market_data_operation_leases (
   cooldown_until   timestamptz,
   updated_at       timestamptz not null default now(),
   primary key (portfolio_id, provider_code, operation),
-  constraint mdol_provider_ck check (provider_code in ('ANGEL_ONE')),
+  constraint mdol_provider_ck check (provider_code = 'ANGEL_ONE'),
   constraint mdol_operation_ck check (operation in ('REFRESH_PRICES','SYNC_MAPPINGS','BACKFILL_EOD'))
 );
 
 revoke all on public.market_data_operation_leases from public;
 revoke all on public.market_data_operation_leases from anon, authenticated;
 grant all on public.market_data_operation_leases to service_role;
-
 alter table public.market_data_operation_leases enable row level security;
--- No browser policy.
+-- Deliberately no browser policy.
 
--- Atomic lease acquisition used only by service-role Edge Functions.
 create function public.acquire_market_data_operation_lease(
   p_portfolio_id uuid,
   p_provider_code text,
@@ -330,42 +276,41 @@ as $$
 declare
   v_now timestamptz := clock_timestamp();
   v_row public.market_data_operation_leases%rowtype;
+  v_block_until timestamptz;
 begin
-  if p_lease_seconds < 1 or p_lease_seconds > 3600 then
-    raise exception 'invalid lease duration' using errcode = '22023';
+  if p_provider_code <> 'ANGEL_ONE'
+     or p_operation not in ('REFRESH_PRICES','SYNC_MAPPINGS','BACKFILL_EOD')
+     or p_lease_seconds < 1 or p_lease_seconds > 3600 then
+    raise exception 'invalid market-data lease request' using errcode = '22023';
   end if;
+
+  perform 1 from public.portfolios where id = p_portfolio_id;
+  if not found then raise exception 'portfolio not found' using errcode = '22023'; end if;
 
   insert into public.market_data_operation_leases(
     portfolio_id, provider_code, operation, lease_holder, lease_expires_at, cooldown_until, updated_at
-  ) values (
-    p_portfolio_id, p_provider_code, p_operation, null, null, null, v_now
-  ) on conflict (portfolio_id, provider_code, operation) do nothing;
+  ) values (p_portfolio_id, p_provider_code, p_operation, null, null, null, v_now)
+  on conflict (portfolio_id, provider_code, operation) do nothing;
 
-  select * into v_row
-  from public.market_data_operation_leases
-  where portfolio_id = p_portfolio_id
-    and provider_code = p_provider_code
-    and operation = p_operation
-  for update;
+  select * into v_row from public.market_data_operation_leases
+   where portfolio_id = p_portfolio_id and provider_code = p_provider_code and operation = p_operation
+   for update;
 
-  if (v_row.lease_expires_at is not null and v_row.lease_expires_at > v_now)
-     or (v_row.cooldown_until is not null and v_row.cooldown_until > v_now) then
-    return query select false,
-      greatest(1, ceil(extract(epoch from greatest(
-        coalesce(v_row.lease_expires_at, v_now),
-        coalesce(v_row.cooldown_until, v_now)
-      ) - v_now))::integer);
+  v_block_until := greatest(
+    coalesce(v_row.lease_expires_at, '-infinity'::timestamptz),
+    coalesce(v_row.cooldown_until, '-infinity'::timestamptz)
+  );
+  if v_block_until > v_now then
+    return query select false, greatest(1, ceil(extract(epoch from v_block_until - v_now))::integer);
     return;
   end if;
 
   update public.market_data_operation_leases
-  set lease_holder = p_lease_holder,
-      lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
-      cooldown_until = null,
-      updated_at = v_now
-  where portfolio_id = p_portfolio_id
-    and provider_code = p_provider_code
-    and operation = p_operation;
+     set lease_holder = p_lease_holder,
+         lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
+         cooldown_until = null,
+         updated_at = v_now
+   where portfolio_id = p_portfolio_id and provider_code = p_provider_code and operation = p_operation;
 
   return query select true, 0;
 end;
@@ -389,26 +334,21 @@ begin
   if p_cooldown_seconds < 0 or p_cooldown_seconds > 86400 then
     raise exception 'invalid cooldown duration' using errcode = '22023';
   end if;
-
   update public.market_data_operation_leases
-  set lease_holder = null,
-      lease_expires_at = null,
-      cooldown_until = v_now + make_interval(secs => p_cooldown_seconds),
-      updated_at = v_now
-  where portfolio_id = p_portfolio_id
-    and provider_code = p_provider_code
-    and operation = p_operation
-    and lease_holder = p_lease_holder;
+     set lease_holder = null,
+         lease_expires_at = null,
+         cooldown_until = v_now + make_interval(secs => p_cooldown_seconds),
+         updated_at = v_now
+   where portfolio_id = p_portfolio_id and provider_code = p_provider_code
+     and operation = p_operation and lease_holder = p_lease_holder;
 end;
 $$;
 
 alter function public.acquire_market_data_operation_lease(uuid,text,text,uuid,integer) owner to postgres;
 alter function public.release_market_data_operation_lease(uuid,text,text,uuid,integer) owner to postgres;
-
 revoke all on function public.acquire_market_data_operation_lease(uuid,text,text,uuid,integer) from public;
 revoke all on function public.acquire_market_data_operation_lease(uuid,text,text,uuid,integer) from anon, authenticated;
 grant execute on function public.acquire_market_data_operation_lease(uuid,text,text,uuid,integer) to service_role;
-
 revoke all on function public.release_market_data_operation_lease(uuid,text,text,uuid,integer) from public;
 revoke all on function public.release_market_data_operation_lease(uuid,text,text,uuid,integer) from anon, authenticated;
 grant execute on function public.release_market_data_operation_lease(uuid,text,text,uuid,integer) to service_role;
@@ -420,11 +360,9 @@ comment on function public.release_market_data_operation_lease(uuid,text,text,uu
 
 commit;
 
--- Post-deployment verification checklist:
--- 1. RLS enabled on all six M13 tables.
--- 2. anon has no privileges on any M13 object.
--- 3. authenticated has SELECT only on mappings/latest/history + own refresh runs.
--- 4. authenticated cannot execute either lease RPC.
--- 5. service_role has write access and lease RPC execution.
--- 6. no secrets/tokens/API credentials exist in any M13 column.
--- 7. current_holdings and transactions definitions are unchanged.
+-- Verification after deployment:
+-- * RLS enabled on all six tables; anon has no access.
+-- * authenticated: SELECT mappings/latest/history and own refresh_runs only.
+-- * authenticated cannot execute lease RPCs; service_role can.
+-- * no secret/token columns exist.
+-- * transactions/current_holdings definitions and grants remain unchanged.
