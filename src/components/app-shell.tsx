@@ -1,5 +1,5 @@
 import { Link, useRouterState, useNavigate } from "@tanstack/react-router";
-import { ChevronDown, LayoutDashboard, ListTree, LogOut, Settings, Upload } from "lucide-react";
+import { ChevronDown, LayoutDashboard, ListTree, LogOut, Receipt, Settings, Upload } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";

@@ -223,8 +223,8 @@ export interface Transaction {
   total_charges: string | null;
   currency: string;
   txn_state: "ACTIVE" | "SUPERSEDED" | "REVERSED";
-  data_quality_state: string;
-  data_quality_issues: string[];
+  data_quality_state: DataQualityState;
+  data_quality_issues: DataQualityIssue[];
   source_system: string | null;
   source_reference: string | null;
   notes: string | null;
