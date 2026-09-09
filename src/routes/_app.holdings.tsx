@@ -188,8 +188,17 @@ function HoldingsPage() {
             </thead>
             <tbody className="divide-y divide-border">
               {query.data.map(({ holding, security, setting }) => {
-                const quantity = holding.net_quantity;
+                // PostgREST may deserialize PostgreSQL numeric/count values as
+                // either JSON numbers or strings depending on the value/type.
+                // Treat both safely at the render boundary instead of assuming
+                // the TypeScript declaration controls runtime JSON shapes.
+                const quantity = holding.net_quantity as unknown as string | number | null;
                 const numeric = quantity === null ? null : Number(quantity);
+                const activeTxnCount = Number(holding.active_txn_count ?? 0);
+                const unhandledTxnCount = Number(holding.unhandled_txn_count ?? 0);
+                const missingQuantityCount = Number(holding.missing_quantity_count ?? 0);
+                const nonValidTxnCount = Number(holding.non_valid_txn_count ?? 0);
+
                 return (
                   <tr key={holding.security_id} className="align-top">
                     <td className="px-4 py-3">
@@ -209,13 +218,13 @@ function HoldingsPage() {
                       {quantity === null ? (
                         <Unavailable reason="Some transactions for this holding are not yet interpretable, so no quantity can be stated." />
                       ) : (
-                        <span className={numeric! < 0 ? "text-destructive" : undefined}>
+                        <span className={numeric !== null && numeric < 0 ? "text-destructive" : undefined}>
                           {trimNumber(quantity)}
                         </span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-xs">
-                      {holding.active_txn_count}
+                      {activeTxnCount}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
                       {holding.first_trade_date ?? "—"} → {holding.last_trade_date ?? "—"}
@@ -228,19 +237,19 @@ function HoldingsPage() {
                         {numeric !== null && numeric < 0 ? (
                           <StatusBadge tone="bad">Negative</StatusBadge>
                         ) : null}
-                        {holding.unhandled_txn_count > 0 ? (
+                        {unhandledTxnCount > 0 ? (
                           <StatusBadge tone="warn">
-                            {holding.unhandled_txn_count} unhandled
+                            {unhandledTxnCount} unhandled
                           </StatusBadge>
                         ) : null}
-                        {holding.missing_quantity_count > 0 ? (
+                        {missingQuantityCount > 0 ? (
                           <StatusBadge tone="warn">
-                            {holding.missing_quantity_count} missing qty
+                            {missingQuantityCount} missing qty
                           </StatusBadge>
                         ) : null}
-                        {holding.non_valid_txn_count > 0 ? (
+                        {nonValidTxnCount > 0 ? (
                           <StatusBadge tone="warn">
-                            {holding.non_valid_txn_count} not valid
+                            {nonValidTxnCount} not valid
                           </StatusBadge>
                         ) : null}
                       </div>
@@ -279,7 +288,8 @@ function HoldingsPage() {
   );
 }
 
-function trimNumber(value: string): string {
-  if (!value.includes(".")) return value;
-  return value.replace(/0+$/, "").replace(/\.$/, "");
+function trimNumber(value: string | number): string {
+  const text = String(value);
+  if (!text.includes(".")) return text;
+  return text.replace(/0+$/, "").replace(/\.$/, "");
 }
