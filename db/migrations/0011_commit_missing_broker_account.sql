@@ -9,7 +9,7 @@
 --   source broker. Guessing a broker would fabricate an accounting fact, while
 --   leaving the row outside the ledger makes current holdings incomplete.
 --
--- This migration therefore permits exactly this additional incomplete shape:
+-- This migration permits exactly this additional incomplete shape:
 --   * canonical security resolved
 --   * supported transaction type
 --   * positive quantity
@@ -23,52 +23,57 @@
 -- INCOMPLETE. It contributes to quantity-based holdings because M08 does not
 -- require a broker account for the arithmetic.
 --
--- This migration also adds one narrowly-scoped trusted repair RPC so an owner
--- may later fill a previously unknown broker account without deleting or
--- rewriting the source evidence. The repair is audit-logged. A known broker
--- can never be silently changed to another broker by this path.
+-- The migration also adds one narrowly-scoped trusted repair RPC so the owner
+-- may later fill a previously unknown broker account. Raw import evidence and
+-- all other economic fields remain immutable; the repair is audit-logged.
 --
--- No existing migration is edited. No CASCADE. No browser write grant is added
--- to transactions. SPLIT / REVERSAL / ADJUSTMENT remain blocked.
+-- No existing migration is edited. No CASCADE. No browser INSERT/UPDATE/DELETE
+-- grant is added to transactions. SPLIT / REVERSAL / ADJUSTMENT remain blocked.
 
 begin;
 
 -- ---------------------------------------------------------------------------
--- 1. Minimal audit trail for trusted data-quality repairs.
+-- 1. Minimal immutable audit trail for trusted data-quality repairs.
 -- ---------------------------------------------------------------------------
 
-create table if not exists public.transaction_repairs (
+create table public.transaction_repairs (
   id                    uuid primary key default gen_random_uuid(),
   owner_id              uuid not null references public.profiles(id) on delete restrict,
   transaction_id        uuid not null references public.transactions(id) on delete restrict,
   repair_type           text not null check (repair_type in ('FILL_MISSING_BROKER_ACCOUNT')),
-  old_broker_account_id uuid references public.broker_accounts(id) on delete restrict,
-  new_broker_account_id uuid references public.broker_accounts(id) on delete restrict,
+  old_broker_account_id uuid,
+  new_broker_account_id uuid not null,
   old_quality_state     public.data_quality_state not null,
   old_quality_issues    public.data_quality_issue[] not null,
   new_quality_state     public.data_quality_state not null,
   new_quality_issues    public.data_quality_issue[] not null,
   created_at            timestamptz not null default now(),
-  constraint transaction_repairs_owner_transaction_unique
-    unique (owner_id, id)
+  constraint transaction_repairs_old_account_owner_fk
+    foreign key (owner_id, old_broker_account_id)
+    references public.broker_accounts(owner_id, id) on delete restrict,
+  constraint transaction_repairs_new_account_owner_fk
+    foreign key (owner_id, new_broker_account_id)
+    references public.broker_accounts(owner_id, id) on delete restrict
 );
 
-create index if not exists transaction_repairs_transaction_idx
+create index transaction_repairs_transaction_idx
   on public.transaction_repairs (transaction_id, created_at);
-create index if not exists transaction_repairs_owner_idx
+create index transaction_repairs_owner_idx
   on public.transaction_repairs (owner_id, created_at);
 
 alter table public.transaction_repairs enable row level security;
 
-drop policy if exists transaction_repairs_select_own on public.transaction_repairs;
 create policy transaction_repairs_select_own on public.transaction_repairs
   for select to authenticated using (owner_id = auth.uid());
 
+revoke all on public.transaction_repairs from public;
+revoke all on public.transaction_repairs from anon;
+revoke all on public.transaction_repairs from authenticated;
 grant select on public.transaction_repairs to authenticated;
 grant all on public.transaction_repairs to service_role;
 
 comment on table public.transaction_repairs is
-  'Immutable audit log of trusted data-quality repairs to canonical transactions.';
+  'Append-only audit log of trusted data-quality repairs to canonical transactions. Browser read-only.';
 
 -- ---------------------------------------------------------------------------
 -- 2. Extend the immutable-field guard by one tightly-defined repair exception.
@@ -123,8 +128,8 @@ revoke execute on function public.transactions_guard_immutable_fields() from pub
 revoke execute on function public.transactions_guard_immutable_fields() from anon, authenticated;
 
 -- ---------------------------------------------------------------------------
--- 3. Commit import batches. M10 missing-date support remains; M11 adds only
---    source-broker-blank + account-null as another explicitly incomplete shape.
+-- 3. Trusted batch commit. M10 missing-date support remains unchanged; M11
+--    adds only source-broker-blank + account-null as an accepted incomplete fact.
 -- ---------------------------------------------------------------------------
 
 create or replace function public.commit_import_batch(p_batch_id uuid)
@@ -212,31 +217,39 @@ begin
   end if;
 
   -- Every RESOLVED row must be either fully VALID or incomplete solely for
-  -- the explicitly supported unknown-date / unknown-source-broker facts.
+  -- the explicitly supported unknown-date / genuinely unstated-broker facts.
   select count(*) into v_bad
     from public.import_source_rows r
    where r.import_batch_id = v_batch.id
      and r.resolution = 'RESOLVED'
      and not (
        (r.data_quality_state = 'VALID'
-        and pg_catalog.cardinality(r.data_quality_issues) = 0
+        and cardinality(r.data_quality_issues) = 0
         and r.candidate_trade_date is not null
         and r.candidate_broker_account_id is not null)
        or
        (r.data_quality_state = 'INCOMPLETE'
-        and pg_catalog.cardinality(r.data_quality_issues) >= 1
+        and cardinality(r.data_quality_issues) >= 1
         and r.data_quality_issues <@ array[
           'MISSING_DATE','MISSING_BROKER','MISSING_ACCOUNT'
         ]::public.data_quality_issue[]
-        and ((r.candidate_trade_date is null and 'MISSING_DATE' = any(r.data_quality_issues))
-             or (r.candidate_trade_date is not null and not ('MISSING_DATE' = any(r.data_quality_issues))))
-        and ((r.candidate_broker_account_id is null
-              and pg_catalog.btrim(pg_catalog.coalesce(r.raw_broker_text, '')) = ''
-              and 'MISSING_BROKER' = any(r.data_quality_issues)
-              and 'MISSING_ACCOUNT' = any(r.data_quality_issues))
-             or (r.candidate_broker_account_id is not null
-                 and not ('MISSING_BROKER' = any(r.data_quality_issues))
-                 and not ('MISSING_ACCOUNT' = any(r.data_quality_issues))))
+        and (
+          (r.candidate_trade_date is null
+           and 'MISSING_DATE' = any(r.data_quality_issues))
+          or
+          (r.candidate_trade_date is not null
+           and not ('MISSING_DATE' = any(r.data_quality_issues)))
+        )
+        and (
+          (r.candidate_broker_account_id is null
+           and btrim(coalesce(r.raw_broker_text, '')) = ''
+           and 'MISSING_BROKER' = any(r.data_quality_issues)
+           and 'MISSING_ACCOUNT' = any(r.data_quality_issues))
+          or
+          (r.candidate_broker_account_id is not null
+           and not ('MISSING_BROKER' = any(r.data_quality_issues))
+           and not ('MISSING_ACCOUNT' = any(r.data_quality_issues)))
+        )
        )
      );
   if v_bad > 0 then
@@ -284,7 +297,7 @@ begin
         raise exception 'commit_import_batch: row %: broker account is invalid', v_row.source_row_number
           using errcode = '22023';
       end if;
-    elsif pg_catalog.btrim(pg_catalog.coalesce(v_row.raw_broker_text, '')) <> '' then
+    elsif btrim(coalesce(v_row.raw_broker_text, '')) <> '' then
       raise exception 'commit_import_batch: row %: source broker is stated but no account is mapped', v_row.source_row_number
         using errcode = '22023';
     end if;
@@ -301,8 +314,8 @@ begin
       raise exception 'commit_import_batch: row %: quantity is required', v_row.source_row_number
         using errcode = '22023';
     end if;
-    if v_row.candidate_currency is null then
-      raise exception 'commit_import_batch: row %: currency is required', v_row.source_row_number
+    if v_row.candidate_currency is null or v_row.candidate_currency !~ '^[A-Z]{3}$' then
+      raise exception 'commit_import_batch: row %: valid currency is required', v_row.source_row_number
         using errcode = '22023';
     end if;
     if coalesce(v_row.candidate_unit_price, 0) < 0
@@ -319,13 +332,13 @@ begin
 
     v_dq_issues := '{}'::public.data_quality_issue[];
     if v_row.candidate_trade_date is null then
-      v_dq_issues := pg_catalog.array_append(v_dq_issues, 'MISSING_DATE'::public.data_quality_issue);
+      v_dq_issues := array_append(v_dq_issues, 'MISSING_DATE'::public.data_quality_issue);
     end if;
     if v_row.candidate_broker_account_id is null then
-      v_dq_issues := pg_catalog.array_append(v_dq_issues, 'MISSING_BROKER'::public.data_quality_issue);
-      v_dq_issues := pg_catalog.array_append(v_dq_issues, 'MISSING_ACCOUNT'::public.data_quality_issue);
+      v_dq_issues := array_append(v_dq_issues, 'MISSING_BROKER'::public.data_quality_issue);
+      v_dq_issues := array_append(v_dq_issues, 'MISSING_ACCOUNT'::public.data_quality_issue);
     end if;
-    v_dq_state := case when pg_catalog.cardinality(v_dq_issues) = 0
+    v_dq_state := case when cardinality(v_dq_issues) = 0
                        then 'VALID'::public.data_quality_state
                        else 'INCOMPLETE'::public.data_quality_state end;
 
@@ -356,7 +369,7 @@ begin
 
   update public.import_batches b
      set state = 'COMMITTED',
-         committed_at = pg_catalog.now(),
+         committed_at = now(),
          total_source_rows = s.total,
          rows_valid        = s.valid,
          rows_incomplete   = s.incomplete,
@@ -431,8 +444,9 @@ begin
     raise exception 'resolve_transaction_broker_account: broker account is already known'
       using errcode = '22023';
   end if;
-  if not ('MISSING_ACCOUNT' = any(v_txn.data_quality_issues)) then
-    raise exception 'resolve_transaction_broker_account: transaction is not flagged MISSING_ACCOUNT'
+  if not ('MISSING_ACCOUNT' = any(v_txn.data_quality_issues))
+     or not ('MISSING_BROKER' = any(v_txn.data_quality_issues)) then
+    raise exception 'resolve_transaction_broker_account: transaction is not flagged as an unknown source broker/account'
       using errcode = '22023';
   end if;
 
@@ -445,10 +459,10 @@ begin
       using errcode = '22023';
   end if;
 
-  v_new_issues := pg_catalog.array_remove(v_txn.data_quality_issues, 'MISSING_ACCOUNT'::public.data_quality_issue);
-  v_new_issues := pg_catalog.array_remove(v_new_issues, 'MISSING_BROKER'::public.data_quality_issue);
+  v_new_issues := array_remove(v_txn.data_quality_issues, 'MISSING_ACCOUNT'::public.data_quality_issue);
+  v_new_issues := array_remove(v_new_issues, 'MISSING_BROKER'::public.data_quality_issue);
   v_new_state := case
-    when pg_catalog.cardinality(v_new_issues) = 0
+    when cardinality(v_new_issues) = 0
       and v_txn.trade_date is not null
       and v_txn.quantity is not null
       then 'VALID'::public.data_quality_state
@@ -483,14 +497,26 @@ revoke all on function public.resolve_transaction_broker_account(uuid, uuid) fro
 grant execute on function public.resolve_transaction_broker_account(uuid, uuid) to authenticated;
 
 comment on function public.resolve_transaction_broker_account(uuid, uuid) is
-  'Owner-scoped trusted repair: fills only a previously NULL broker_account_id on an ACTIVE transaction flagged MISSING_ACCOUNT, removes MISSING_BROKER/MISSING_ACCOUNT, and records an immutable audit row.';
+  'Owner-scoped trusted repair: fills only a previously NULL broker_account_id on an ACTIVE transaction flagged MISSING_BROKER + MISSING_ACCOUNT, removes those two issues, and writes an audit row.';
 
 commit;
 
+-- Verification before enabling the frontend M11 flag:
+--   * source-broker blank + account NULL + otherwise complete commits INCOMPLETE
+--     with MISSING_BROKER + MISSING_ACCOUNT (plus MISSING_DATE when applicable)
+--   * source-broker stated + account NULL remains blocked
+--   * missing account plus any unrelated issue remains blocked
+--   * dated/known-account and M10 date-null/known-account behavior is unchanged
+--   * SPLIT / REVERSAL / ADJUSTMENT remain blocked
+--   * current_holdings includes quantity from broker-unknown ACTIVE transactions
+--   * browser still cannot INSERT/UPDATE/DELETE public.transactions directly
+--   * resolve_transaction_broker_account accepts only owner-owned ACTIVE rows
+--     whose broker/account was previously NULL and flagged missing
+--   * a second repair or attempt to change a known broker is rejected
+--   * transaction_repairs receives one immutable audit row per successful repair
+--
 -- Rollback guidance
--- 1. Do not roll back while users depend on resolve_transaction_broker_account.
--- 2. Recreate commit_import_batch from 0010 if M11 commit semantics must be removed.
--- 3. Recreate transactions_guard_immutable_fields from 0006 if the one-time
---    broker-fill exception must be removed.
--- 4. Drop resolve_transaction_broker_account, then transaction_repairs only
---    after confirming its audit history is no longer required. Never CASCADE.
+--   Recreate public.commit_import_batch from 0010 and recreate
+--   public.transactions_guard_immutable_fields from 0006 before dropping the
+--   repair RPC/table. Do not roll back while application code depends on M11.
+--   Never use CASCADE.
