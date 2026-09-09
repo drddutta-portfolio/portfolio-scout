@@ -632,15 +632,15 @@ function Reconciliation({ batchId, portfolioId }: { batchId: string; portfolioId
       const rows = (data ?? []) as CurrentHolding[];
       const ids = rows.map((row) => row.security_id);
       const securities = ids.length
-        ? await supabase.from("securities").select("id,symbol").in("id", ids)
+        ? await supabase.from("securities").select("id,primary_symbol").in("id", ids)
         : { data: [], error: null };
       if (securities.error) throw new Error(securities.error.message);
       const symbolById = new Map(
-        ((securities.data ?? []) as Pick<Security, "id" | "symbol">[]).map((s) => [s.id, s.symbol]),
+        ((securities.data ?? []) as Pick<Security, "id" | "primary_symbol">[]).map((s) => [s.id, s.primary_symbol]),
       );
       const bySymbol = new Map<string, CurrentHolding>();
       for (const row of rows) {
-        const symbol = symbolById.get(row.security_id);
+        const symbol = symbolById.get(row.security_id) ?? null;
         if (symbol) bySymbol.set(symbol.toUpperCase(), row);
       }
       return bySymbol;

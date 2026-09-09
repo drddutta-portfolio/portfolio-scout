@@ -73,13 +73,13 @@ function TransactionsPage() {
       if (ids.length > 0) {
         const { data: secs, error: secError } = await supabase
           .from("securities")
-          .select("id,symbol,name")
+          .select("id,primary_symbol,name")
           .in("id", ids);
         if (secError) throw new Error(secError.message);
         names = new Map(
-          ((secs ?? []) as Pick<Security, "id" | "symbol" | "name">[]).map((s) => [
+          ((secs ?? []) as Pick<Security, "id" | "primary_symbol" | "name">[]).map((s) => [
             s.id,
-            s.symbol ? `${s.symbol} · ${s.name}` : s.name,
+            s.primary_symbol ? `${s.primary_symbol} · ${s.name}` : s.name,
           ]),
         );
       }
