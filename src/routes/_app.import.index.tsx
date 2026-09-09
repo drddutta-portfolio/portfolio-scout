@@ -338,7 +338,8 @@ function ImportPage() {
                 </Button>
                 {!canStage ? (
                   <p className="text-xs text-muted-foreground">
-                    Map at least security, transaction type, trade date and quantity.
+                    Provide security, quantity, and a transaction type and trade date — either
+                    mapped from the file or chosen above for the whole file.
                   </p>
                 ) : null}
               </div>
