@@ -35,11 +35,17 @@
 --   * No CASCADE anywhere. No new grant. No service-role application credential.
 --
 -- Rollback
---   Reverting is only safe while no canonical transaction with a NULL trade_date
---   exists; otherwise the restored M06 constraint would contradict committed
---   lineage rows. Check first:
---     select count(*) from public.transactions
---      where trade_date is null and import_source_row_id is not null;
+--   The old M06 staging constraint can be restored only when no currently
+--   RESOLVED staging row relies on the relaxed NULL-date rule. Already COMMITTED
+--   rows do not violate the old M06 RESOLVED constraint, and M05 already permits
+--   canonical non-VALID transactions whose trade_date is NULL.
+--
+--   Check first:
+--     select count(*)
+--       from public.import_source_rows
+--      where resolution = 'RESOLVED'
+--        and candidate_trade_date is null;
+--
 --   If that count is 0:
 --   begin;
 --   alter table public.import_source_rows
