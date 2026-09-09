@@ -59,6 +59,14 @@
       no service-role credential in the application.
       Deferred: role-change history and corporate-action modelling.
 
+## Multi-sheet workbook import + manual trades + transactions page (built)
+
+- Workbook parsing reads every sheet; the trades sheet is detected from its headings.
+- HOLDINGS sheet is kept only as a browser-side comparison after commit; STOCKMASTER only supplies ISIN matching evidence.
+- Rows with no security and no quantity are skipped and the count is disclosed.
+- Manual trades are staged as one-row MANUAL batches through the same review + commit_import_batch path.
+- /transactions lists finalised transactions with filters. Staged rows can be edited, excluded or deleted; finalised corrections/reversals remain unavailable (M07 rejects SPLIT/REVERSAL/ADJUSTMENT and transactions are browser read-only).
+
 ## In progress
 - [x] Migration 09a (security master seed) — DEPLOYED AND VERIFIED 2026-09-08: 6,114 securities / 28,979 aliases, idempotent. See `docs/migration-09a-review.md`. DATABASE EXPANSION STOPPED.
       Build from authoritative NSE/BSE/depository sources, deterministic dedup + review report.
