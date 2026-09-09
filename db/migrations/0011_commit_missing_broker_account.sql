@@ -32,6 +32,12 @@
 
 begin;
 
+-- Owner-safe FK target for the repair audit table. The PK already guarantees id
+-- uniqueness; this additional key exists only so owner_id can participate in
+-- composite foreign keys, matching the ownership pattern used elsewhere.
+alter table public.transactions
+  add constraint transactions_owner_id_id_key unique (owner_id, id);
+
 -- ---------------------------------------------------------------------------
 -- 1. Minimal immutable audit trail for trusted data-quality repairs.
 -- ---------------------------------------------------------------------------
@@ -39,7 +45,7 @@ begin;
 create table public.transaction_repairs (
   id                    uuid primary key default gen_random_uuid(),
   owner_id              uuid not null references public.profiles(id) on delete restrict,
-  transaction_id        uuid not null references public.transactions(id) on delete restrict,
+  transaction_id        uuid not null,
   repair_type           text not null check (repair_type in ('FILL_MISSING_BROKER_ACCOUNT')),
   old_broker_account_id uuid,
   new_broker_account_id uuid not null,
@@ -48,6 +54,9 @@ create table public.transaction_repairs (
   new_quality_state     public.data_quality_state not null,
   new_quality_issues    public.data_quality_issue[] not null,
   created_at            timestamptz not null default now(),
+  constraint transaction_repairs_owner_transaction_fk
+    foreign key (owner_id, transaction_id)
+    references public.transactions(owner_id, id) on delete restrict,
   constraint transaction_repairs_old_account_owner_fk
     foreign key (owner_id, old_broker_account_id)
     references public.broker_accounts(owner_id, id) on delete restrict,
