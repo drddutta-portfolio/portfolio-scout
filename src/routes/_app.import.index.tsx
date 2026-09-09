@@ -16,7 +16,7 @@ import { EmptyState, ErrorState, LoadingState, PageHeader, StatusBadge } from "@
 import { MAPPABLE_FIELDS, guessMapping, type MappableField } from "@/lib/import-logic";
 import { parseSpreadsheet, type ParsedFile } from "@/lib/parse-file";
 import { chunks } from "@/lib/security-resolution";
-import type { ImportBatch } from "@/lib/types";
+import { SUPPORTED_TXN_TYPES, type ImportBatch, type TxnType } from "@/lib/types";
 import { useAuth, useSupabase } from "@/providers/auth";
 import { usePortfolios } from "@/providers/portfolio";
 
