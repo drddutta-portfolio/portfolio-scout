@@ -49,7 +49,7 @@ export function PortfolioProvider({ children }: { children: React.ReactNode }) {
   // Only a validated, owned portfolio id is ever active.
   const activePortfolio = useMemo(() => {
     if (portfolios.length === 0) return null;
-    return portfolios.find((p) => p.id === storedId) ?? portfolios[0];
+    return portfolios.find((p) => p.id === storedId) ?? portfolios[0] ?? null;
   }, [portfolios, storedId]);
 
   const setActivePortfolioId = useCallback((id: string) => {
