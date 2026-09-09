@@ -28,6 +28,7 @@ import {
   parseSourceDate,
   parseSourceNumber,
   parseTxnType,
+  readHoldingsClaim,
 } from "@/lib/import-logic";
 import {
   buildMasterIndex,
@@ -35,7 +36,14 @@ import {
   resolveCandidates,
   type Candidates,
 } from "@/lib/security-resolution";
-import type { Broker, BrokerAccount, ImportBatch, ImportSourceRow, Security } from "@/lib/types";
+import type {
+  Broker,
+  BrokerAccount,
+  CurrentHolding,
+  ImportBatch,
+  ImportSourceRow,
+  Security,
+} from "@/lib/types";
 import { useSupabase } from "@/providers/auth";
 
 export const Route = createFileRoute("/_app/import/$batchId")({
