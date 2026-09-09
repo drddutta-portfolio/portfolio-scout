@@ -8,6 +8,10 @@ import type { Security } from "@/lib/types";
  * Priority: exact ISIN, then exact exchange + symbol, then exact normalized
  * supported alias. No fuzzy matching, no name similarity, no auto-resolve:
  * a single candidate is only ever SUGGESTED until the user confirms it.
+ *
+ * Source workbooks may encode an exchange-qualified symbol in one cell, e.g.
+ * "NSE:BBOX" or "BSE:500325". That shape is parsed deterministically into
+ * exchange=NSE/BSE and symbol=BBOX/500325; nothing is guessed.
  */
 
 export type MatchBasis = "ISIN" | "EXCHANGE_SYMBOL" | "ALIAS" | null;
@@ -32,6 +36,22 @@ export function normalizeAlias(input: string): string {
     .toUpperCase();
 }
 
+/**
+ * Parse only explicit exchange-qualified source text. Supported examples:
+ * NSE:INFY, NSE - INFY, BSE:500209. No inferred exchange is ever added.
+ */
+export function parseQualifiedSymbol(
+  securityText: string | null | undefined,
+): { exchange: string; symbol: string } | null {
+  if (!securityText) return null;
+  const value = normalizeAlias(securityText);
+  const match = /^(NSE|BSE)\s*(?::|\-|\/)\s*(.+)$/.exec(value);
+  if (!match) return null;
+  const symbol = normalizeAlias(match[2] ?? "");
+  if (!symbol) return null;
+  return { exchange: match[1]!, symbol };
+}
+
 interface MasterIndex {
   byIsin: Map<string, Security[]>;
   byExchangeSymbol: Map<string, Security[]>;
@@ -48,8 +68,19 @@ export async function buildMasterIndex(
   const isins = unique(
     inputs.map((i) => (i.isin ? i.isin.trim().toUpperCase() : null)).filter(isString),
   );
+
+  // Query both the literal source text and, when the source explicitly embeds
+  // NSE/BSE, the exact stripped symbol. This fixes rows such as "NSE:BBOX"
+  // without creating aliases or broadening matching semantics.
   const texts = unique(
-    inputs.map((i) => (i.securityText ? normalizeAlias(i.securityText) : null)).filter(isString),
+    inputs
+      .flatMap((i) => {
+        if (!i.securityText) return [] as string[];
+        const literal = normalizeAlias(i.securityText);
+        const qualified = parseQualifiedSymbol(i.securityText);
+        return qualified ? [literal, qualified.symbol] : [literal];
+      })
+      .filter(isString),
   );
 
   const byIsin = new Map<string, Security[]>();
@@ -117,16 +148,29 @@ export function resolveCandidates(index: MasterIndex, input: ResolutionInput): C
     if (hits.length > 0) return { securities: hits, basis: "ISIN" };
   }
 
-  const text = input.securityText ? normalizeAlias(input.securityText) : null;
-  const exchange = input.exchange ? input.exchange.trim().toUpperCase() : null;
+  const explicitExchange = input.exchange ? input.exchange.trim().toUpperCase() : null;
+  const literalText = input.securityText ? normalizeAlias(input.securityText) : null;
+  const qualified = parseQualifiedSymbol(input.securityText);
 
-  if (text && exchange) {
-    const hits = dedupe(index.byExchangeSymbol.get(`${exchange}::${text}`) ?? []);
+  // Prefer an explicit exchange column. Otherwise an explicit NSE:/BSE: prefix
+  // is itself sufficient source evidence for exact exchange+symbol resolution.
+  const exchange = explicitExchange ?? qualified?.exchange ?? null;
+  const symbol = qualified?.symbol ?? literalText;
+
+  if (symbol && exchange) {
+    const hits = dedupe(index.byExchangeSymbol.get(`${exchange}::${symbol}`) ?? []);
     if (hits.length > 0) return { securities: hits, basis: "EXCHANGE_SYMBOL" };
   }
 
-  if (text) {
-    const hits = dedupe(index.byAlias.get(text) ?? []);
+  // If a qualified source string did not resolve exchange+symbol, only try its
+  // stripped exact symbol as an alias. This remains exact, never fuzzy.
+  if (symbol) {
+    const hits = dedupe(index.byAlias.get(symbol) ?? []);
+    if (hits.length > 0) return { securities: hits, basis: "ALIAS" };
+  }
+
+  if (literalText && literalText !== symbol) {
+    const hits = dedupe(index.byAlias.get(literalText) ?? []);
     if (hits.length > 0) return { securities: hits, basis: "ALIAS" };
   }
 
