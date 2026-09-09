@@ -95,7 +95,7 @@ function PortfoliosPanel() {
         if (!Number.isInteger(parsedTarget) || parsedTarget < 0) {
           throw new Error("Core target must be a whole number of stocks.");
         }
-        payload.core_target_count = parsedTarget;
+        payload['core_target_count'] = parsedTarget;
       }
       const { data, error: insertError } = await supabase
         .from("portfolios")
@@ -247,7 +247,7 @@ export function BrokerAccountsPanel({ compact = false }: { compact?: boolean }) 
         broker_id: brokerId,
         nickname: nickname.trim(),
       };
-      if (masked.trim()) payload.masked_account_reference = masked.trim();
+      if (masked.trim()) payload['account_ref_masked'] = masked.trim();
       const { error } = await supabase.from("broker_accounts").insert(payload);
       if (error) throw new Error(error.message);
     },
@@ -281,8 +281,8 @@ export function BrokerAccountsPanel({ compact = false }: { compact?: boolean }) 
                   <p className="truncate text-sm font-medium text-foreground">{account.nickname}</p>
                   <p className="font-mono text-[11px] text-muted-foreground">
                     {brokerName(account.broker_id)}
-                    {account.masked_account_reference
-                      ? ` · ${account.masked_account_reference}`
+                    {account.account_ref_masked
+                      ? ` · ${account.account_ref_masked}`
                       : ""}
                   </p>
                 </div>
