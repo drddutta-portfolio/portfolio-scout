@@ -173,11 +173,14 @@ function ImportPage() {
     );
   }
 
+  const hasType = mapping.txn_type !== undefined || snapshotType !== "";
+  const hasDate = mapping.date !== undefined || snapshotDate !== "";
+
   const canStage = Boolean(
     parsed &&
       mapping.security_text !== undefined &&
-      mapping.txn_type !== undefined &&
-      mapping.date !== undefined &&
+      hasType &&
+      hasDate &&
       mapping.quantity !== undefined,
   );
 
