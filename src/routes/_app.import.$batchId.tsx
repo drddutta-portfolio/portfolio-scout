@@ -404,6 +404,9 @@ function BatchPage() {
           <Button variant="outline" onClick={confirmAllSuggestions}>
             Confirm all single suggestions
           </Button>
+          <Button variant="outline" onClick={excludeBlocked} disabled={blockedCount === 0}>
+            Exclude {blockedCount} incomplete rows
+          </Button>
           <Button variant="ghost" onClick={() => setShowAccounts((v) => !v)}>
             {showAccounts ? "Hide" : "Add"} broker account
           </Button>
