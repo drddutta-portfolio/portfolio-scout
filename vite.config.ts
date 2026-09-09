@@ -7,6 +7,14 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
+  // Migration 10 was deployed to the dedicated PortfolioAI Supabase project on
+  // 2026-09-09. Missing trade dates are now a supported, explicitly incomplete
+  // ledger state, so the import review can enable that path permanently.
+  vite: {
+    define: {
+      "import.meta.env.VITE_M10_NULL_DATE_COMMIT": JSON.stringify("true"),
+    },
+  },
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
