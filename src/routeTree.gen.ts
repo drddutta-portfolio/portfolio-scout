@@ -17,6 +17,7 @@ import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppHoldingsRouteImport } from './routes/_app.holdings'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
+import { Route as AppImportIndexRouteImport } from './routes/_app.import.index'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -57,6 +58,11 @@ const AppSettingsRoute = AppSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AppRoute,
 } as any)
+const AppImportIndexRoute = AppImportIndexRouteImport.update({
+  id: '/import/',
+  path: '/import/',
+  getParentRoute: () => AppRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -66,6 +72,7 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof AppDashboardRoute
   '/holdings': typeof AppHoldingsRoute
   '/settings': typeof AppSettingsRoute
+  '/import/': typeof AppImportIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -75,6 +82,7 @@ export interface FileRoutesByTo {
   '/dashboard': typeof AppDashboardRoute
   '/holdings': typeof AppHoldingsRoute
   '/settings': typeof AppSettingsRoute
+  '/import': typeof AppImportIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -86,6 +94,7 @@ export interface FileRoutesById {
   '/_app/dashboard': typeof AppDashboardRoute
   '/_app/holdings': typeof AppHoldingsRoute
   '/_app/settings': typeof AppSettingsRoute
+  '/_app/import/': typeof AppImportIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -97,6 +106,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/holdings'
     | '/settings'
+    | '/import/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -106,6 +116,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/holdings'
     | '/settings'
+    | '/import'
   id:
     | '__root__'
     | '/'
@@ -116,6 +127,7 @@ export interface FileRouteTypes {
     | '/_app/dashboard'
     | '/_app/holdings'
     | '/_app/settings'
+    | '/_app/import/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -184,6 +196,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/import/': {
+      id: '/_app/import/'
+      path: '/import'
+      fullPath: '/import/'
+      preLoaderRoute: typeof AppImportIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
@@ -191,12 +210,14 @@ interface AppRouteChildren {
   AppDashboardRoute: typeof AppDashboardRoute
   AppHoldingsRoute: typeof AppHoldingsRoute
   AppSettingsRoute: typeof AppSettingsRoute
+  AppImportIndexRoute: typeof AppImportIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppDashboardRoute: AppDashboardRoute,
   AppHoldingsRoute: AppHoldingsRoute,
   AppSettingsRoute: AppSettingsRoute,
+  AppImportIndexRoute: AppImportIndexRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
