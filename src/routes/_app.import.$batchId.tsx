@@ -545,14 +545,25 @@ function BatchPage() {
                     ) : null}
                   </td>
                   <td className="px-3 py-3 text-right">
-                    {!isCommitted ? (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setChoice(row.id, { excluded: !choice.excluded })}
-                      >
-                        {choice.excluded ? "Include" : "Exclude"}
-                      </Button>
+                    {!isCommitted && row.resolution !== "COMMITTED" ? (
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setChoice(row.id, { excluded: !choice.excluded })}
+                        >
+                          {choice.excluded ? "Include" : "Exclude"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive"
+                          disabled={removeRow.isPending}
+                          onClick={() => removeRow.mutate(row.id)}
+                        >
+                          Delete
+                        </Button>
+                      </div>
                     ) : null}
                   </td>
                 </tr>
