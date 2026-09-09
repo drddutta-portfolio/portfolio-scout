@@ -79,9 +79,15 @@ grant insert (
   spreadsheet_current_value, spreadsheet_unrealized_pl,
   spreadsheet_unrealized_pct, spreadsheet_realized_pl,
   spreadsheet_realized_pct, sector, market_cap, cap_category,
-  source_filename, source_file_sha256, snapshot_as_of_date
+  source_filename, source_file_sha256, snapshot_as_of_date, imported_at
 ) on public.portfolio_holding_snapshots to authenticated;
+
+-- The client uses UPSERT on the unique owner/portfolio/security key. RLS still
+-- requires owner_id=auth.uid(), and the portfolio FK still restricts rows to a
+-- portfolio owned by that same user. Allowing these key columns in UPDATE is
+-- therefore owner-scoped and is limited to this supplemental snapshot table.
 grant update (
+  owner_id, portfolio_id, security_id,
   source_ticker, source_company_name, net_units_claim, avg_buy_price,
   invested_value, spreadsheet_current_price, spreadsheet_current_value,
   spreadsheet_unrealized_pl, spreadsheet_unrealized_pct,
