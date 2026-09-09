@@ -84,3 +84,17 @@
 - Review workspace: deterministic suggestions requiring explicit confirmation, explicit broker account, exclusions, commit via public.commit_import_batch.
 - Holdings from current_holdings with UNAVAILABLE disclosure and role assignment.
 - No prices, valuation, weights, cost basis or P&L in this milestone.
+
+## Migration 10 — PREPARED ONLY, NOT DEPLOYED
+- `db/migrations/0010_commit_missing_trade_date.sql` lets a row whose ONLY defect is an unknown
+  trade date commit with `trade_date NULL`, `INCOMPLETE`, `{MISSING_DATE}`. No other rule relaxed;
+  M01–M09a untouched; SPLIT/REVERSAL/ADJUSTMENT still blocked; M08 unchanged.
+- Verification plan: `db/migrations/0010_VERIFICATION.md`. Nothing was executed against Supabase.
+- The UI path is gated by `VITE_M10_NULL_DATE_COMMIT`; unset means today's behaviour exactly.
+
+## Import review improvements
+- Broker mapping panel: one row per distinct source broker name, mapped to one demat account;
+  blank broker names stay unassigned; row-level picks are never overwritten without confirming.
+- Holdings-sheet reconciliation now resolves each ticker to a canonical security through the same
+  deterministic identity rules as imports and compares by security id; unresolved/ambiguous tickers
+  are shown as not compared.

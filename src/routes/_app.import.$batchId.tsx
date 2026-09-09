@@ -13,13 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  ErrorState,
-  IssueBadges,
-  LoadingState,
-  PageHeader,
-  StatusBadge,
-} from "@/components/state";
+import { ErrorState, IssueBadges, LoadingState, PageHeader, StatusBadge } from "@/components/state";
 import { BrokerAccountsPanel } from "@/routes/_app.settings";
 import {
   evaluateRow,
@@ -71,6 +65,16 @@ interface RowChoice {
   excluded: boolean;
 }
 
+/**
+ * Migration 10 (prepared, not deployed) lets a row whose only defect is an
+ * unknown trade date reach the ledger as INCOMPLETE + MISSING_DATE. Until the
+ * migration is actually deployed this stays off, so the deployed commit
+ * function is never called with a shape it would reject.
+ */
+const ALLOW_MISSING_DATE = import.meta.env["VITE_M10_NULL_DATE_COMMIT"] === "true";
+
+const BLANK_BROKER = "\u0000blank";
+
 function BatchPage() {
   const { batchId } = Route.useParams();
   const supabase = useSupabase();
@@ -80,6 +84,9 @@ function BatchPage() {
   const [choices, setChoices] = useState<Record<string, RowChoice>>({});
   const [declaredCurrency, setDeclaredCurrency] = useState("");
   const [showAccounts, setShowAccounts] = useState(false);
+  /** Rows where the user picked an account by hand; never overwritten silently. */
+  const [explicitAccounts, setExplicitAccounts] = useState<Record<string, true>>({});
+  const [brokerMap, setBrokerMap] = useState<Record<string, string>>({});
 
   const batchQuery = useQuery({
     queryKey: ["batch", batchId],
@@ -172,16 +179,19 @@ function BatchPage() {
       const tradeDate = parseSourceDate(row.raw_date);
       const quantity = parseSourceNumber(row.raw_quantity);
       const currency = (row.raw_currency ?? declaredCurrency).trim().toUpperCase() || null;
-      const verdict = evaluateRow({
-        securityResolved: Boolean(choice.securityId),
-        securityAmbiguous: (candidates?.securities.length ?? 0) > 1 && !choice.securityId,
-        brokerAccountId: choice.brokerAccountId,
-        brokerTextPresent: Boolean(row.raw_broker_text),
-        txnType,
-        tradeDate,
-        quantity,
-        currency: currency && /^[A-Z]{3}$/.test(currency) ? currency : null,
-      });
+      const verdict = evaluateRow(
+        {
+          securityResolved: Boolean(choice.securityId),
+          securityAmbiguous: (candidates?.securities.length ?? 0) > 1 && !choice.securityId,
+          brokerAccountId: choice.brokerAccountId,
+          brokerTextPresent: Boolean(row.raw_broker_text),
+          txnType,
+          tradeDate,
+          quantity,
+          currency: currency && /^[A-Z]{3}$/.test(currency) ? currency : null,
+        },
+        { allowMissingDate: ALLOW_MISSING_DATE },
+      );
       return { row, choice, candidates, txnType, tradeDate, quantity, currency, verdict };
     });
   }, [rows, choices, matchesQuery.data, declaredCurrency]);
@@ -189,8 +199,32 @@ function BatchPage() {
   const includedRows = derived.filter((item) => !item.choice.excluded);
   const readyCount = includedRows.filter((item) => item.verdict.ready).length;
   const blockedCount = includedRows.length - readyCount;
+  /** Blocked only because the source never stated a date (unblocked by M10). */
+  const awaitingDateSupport = ALLOW_MISSING_DATE
+    ? 0
+    : includedRows.filter((item) => !item.verdict.ready && item.verdict.missingDateOnly).length;
   const batch = batchQuery.data;
   const isCommitted = batch?.state === "COMMITTED";
+
+  /** Distinct source broker names in the batch, with their row counts. */
+  const brokerGroups = useMemo(() => {
+    const map = new Map<string, { label: string; rowIds: string[] }>();
+    for (const item of derived) {
+      const raw = (item.row.raw_broker_text ?? "").trim();
+      const key = raw === "" ? BLANK_BROKER : raw.toUpperCase();
+      const entry = map.get(key) ?? {
+        label: raw === "" ? "(no broker stated)" : raw,
+        rowIds: [],
+      };
+      entry.rowIds.push(item.row.id);
+      map.set(key, entry);
+    }
+    return Array.from(map.entries())
+      .map(([key, value]) => ({ key, ...value }))
+      .sort((a, b) =>
+        a.key === BLANK_BROKER ? 1 : b.key === BLANK_BROKER ? -1 : a.label.localeCompare(b.label),
+      );
+  }, [derived]);
 
   const save = useMutation({
     mutationFn: async () => {
@@ -218,19 +252,28 @@ function BatchPage() {
                 row.raw_source_reference,
               ]),
             };
+            // A row that is complete apart from an unknown date is stored as
+            // RESOLVED + INCOMPLETE + MISSING_DATE. The date is never invented.
+            const resolvedQuality =
+              verdict.issues.length === 0
+                ? { data_quality_state: "VALID", data_quality_issues: [] as string[] }
+                : { data_quality_state: "INCOMPLETE", data_quality_issues: ["MISSING_DATE"] };
             const payload = choice.excluded
               ? {
                   ...base,
                   resolution: "EXCLUDED",
-                  data_quality_state: verdict.ready ? "VALID" : verdict.dataQualityState,
-                  data_quality_issues: verdict.ready ? [] : verdict.issues,
+                  data_quality_state: verdict.ready
+                    ? resolvedQuality.data_quality_state
+                    : verdict.dataQualityState,
+                  data_quality_issues: verdict.ready
+                    ? resolvedQuality.data_quality_issues
+                    : verdict.issues,
                 }
               : verdict.ready
                 ? {
                     ...base,
                     resolution: "RESOLVED",
-                    data_quality_state: "VALID",
-                    data_quality_issues: [],
+                    ...resolvedQuality,
                   }
                 : {
                     ...base,
@@ -238,6 +281,7 @@ function BatchPage() {
                     data_quality_state: verdict.dataQualityState,
                     data_quality_issues: verdict.issues,
                   };
+
             const { error } = await supabase
               .from("import_source_rows")
               .update(payload)
@@ -297,7 +341,8 @@ function BatchPage() {
     onError: (err: Error) => toast.error(err.message),
   });
 
-  if (batchQuery.isLoading || rowsQuery.isLoading) return <LoadingState label="Loading the batch" />;
+  if (batchQuery.isLoading || rowsQuery.isLoading)
+    return <LoadingState label="Loading the batch" />;
   if (batchQuery.error) return <ErrorState error={batchQuery.error} />;
   if (rowsQuery.error) return <ErrorState error={rowsQuery.error} />;
   if (!batch) return <ErrorState error="Batch not found" />;
@@ -318,6 +363,12 @@ function BatchPage() {
     }));
   }
 
+  /** A row-level pick is the user's own decision and is never overwritten silently. */
+  function setRowAccount(rowId: string, accountId: string) {
+    setExplicitAccounts((prev) => ({ ...prev, [rowId]: true }));
+    setChoice(rowId, { brokerAccountId: accountId });
+  }
+
   function confirmAllSuggestions() {
     setChoices((prev) => {
       const next = { ...prev };
@@ -335,18 +386,33 @@ function BatchPage() {
     });
   }
 
-  function applyAccountToAll(accountId: string) {
+  /**
+   * Assigns one demat account to every row whose source broker name matches.
+   * Rows the user already set by hand keep their choice unless `force` is set,
+   * which only happens through the explicit re-apply confirmation.
+   */
+  function applyBrokerMapping(groupKey: string, accountId: string, force = false) {
+    const group = brokerGroups.find((g) => g.key === groupKey);
+    if (!group || !accountId) return;
+    let overwritten = 0;
     setChoices((prev) => {
       const next = { ...prev };
-      for (const item of derived) {
-        next[item.row.id] = {
-          securityId: next[item.row.id]?.securityId ?? null,
+      for (const rowId of group.rowIds) {
+        const current = next[rowId];
+        if (!force && explicitAccounts[rowId] && current?.brokerAccountId) continue;
+        if (current?.brokerAccountId && current.brokerAccountId !== accountId) overwritten += 1;
+        next[rowId] = {
+          securityId: current?.securityId ?? null,
           brokerAccountId: accountId,
-          excluded: next[item.row.id]?.excluded ?? false,
+          excluded: current?.excluded ?? false,
         };
       }
       return next;
     });
+    toast.success(
+      `${group.rowIds.length} rows from ${group.label} mapped` +
+        (overwritten > 0 ? ` · ${overwritten} previous choices replaced` : ""),
+    );
   }
 
   /** Sets aside every row that is not complete, so the rest can be committed. */
@@ -364,8 +430,6 @@ function BatchPage() {
       return next;
     });
   }
-
-
 
   return (
     <>
@@ -407,21 +471,6 @@ function BatchPage() {
               onChange={(e) => setDeclaredCurrency(e.target.value.toUpperCase())}
             />
           </div>
-          <div className="w-52 space-y-1.5">
-            <Label>Apply one account to all</Label>
-            <Select onValueChange={applyAccountToAll}>
-              <SelectTrigger>
-                <SelectValue placeholder="Choose account" />
-              </SelectTrigger>
-              <SelectContent>
-                {accounts.map((account) => (
-                  <SelectItem key={account.id} value={account.id}>
-                    {account.nickname} · {brokerName(account.broker_id)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
           <Button variant="outline" onClick={confirmAllSuggestions}>
             Confirm all single suggestions
           </Button>
@@ -446,8 +495,78 @@ function BatchPage() {
             <p className="w-full text-xs text-muted-foreground">
               Every included row must be complete before committing. Resolve or exclude the{" "}
               {blockedCount} blocked rows.
+              {awaitingDateSupport > 0
+                ? ` ${awaitingDateSupport} of them are complete apart from a date the source never stated; they can be committed once the missing-date update is deployed.`
+                : ""}
             </p>
           ) : null}
+        </section>
+      ) : null}
+
+      {!isCommitted ? (
+        <section className="mb-4 rounded-lg border border-border bg-card p-4">
+          <h2 className="text-sm font-semibold text-foreground">Broker names in this file</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Each broker name found in the file is listed once. Choose which of your accounts it
+            belongs to; only the matching rows are assigned. Rows you set by hand keep your choice
+            unless you use “Re-apply”.
+          </p>
+          <div className="mt-3 space-y-2">
+            {brokerGroups.map((group) => {
+              const assigned = group.rowIds.filter((id) => choices[id]?.brokerAccountId).length;
+              return (
+                <div key={group.key} className="flex flex-wrap items-center gap-3">
+                  <span className="w-52 truncate text-sm text-foreground">
+                    {group.label}
+                    {group.key === BLANK_BROKER ? (
+                      <StatusBadge tone="warn" className="ml-2">
+                        not stated
+                      </StatusBadge>
+                    ) : null}
+                  </span>
+                  <span className="w-28 font-mono text-[11px] text-muted-foreground">
+                    {assigned}/{group.rowIds.length} set
+                  </span>
+                  <Select
+                    value={brokerMap[group.key] ?? ""}
+                    onValueChange={(value) => {
+                      setBrokerMap((prev) => ({ ...prev, [group.key]: value }));
+                      applyBrokerMapping(group.key, value);
+                    }}
+                  >
+                    <SelectTrigger className="h-8 w-[240px]">
+                      <SelectValue placeholder="Choose account" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {accounts.map((account) => (
+                        <SelectItem key={account.id} value={account.id}>
+                          {account.nickname} · {brokerName(account.broker_id)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={!brokerMap[group.key]}
+                    onClick={() => {
+                      const accountId = brokerMap[group.key];
+                      if (!accountId) return;
+                      if (
+                        window.confirm(
+                          `Replace the account on all ${group.rowIds.length} rows from ${group.label}, including rows you set by hand?`,
+                        )
+                      ) {
+                        applyBrokerMapping(group.key, accountId, true);
+                      }
+                    }}
+                  >
+                    Re-apply to all
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
         </section>
       ) : null}
 
@@ -534,7 +653,7 @@ function BatchPage() {
                     ) : (
                       <Select
                         value={choice.brokerAccountId ?? ""}
-                        onValueChange={(value) => setChoice(row.id, { brokerAccountId: value })}
+                        onValueChange={(value) => setRowAccount(row.id, value)}
                       >
                         <SelectTrigger className="h-8 w-[190px]">
                           <SelectValue placeholder="Choose account" />
@@ -553,7 +672,20 @@ function BatchPage() {
                     {choice.excluded ? (
                       <StatusBadge tone="neutral">excluded</StatusBadge>
                     ) : verdict.ready ? (
-                      <StatusBadge tone="ok">ready</StatusBadge>
+                      <div className="space-y-1">
+                        <StatusBadge tone="ok">ready</StatusBadge>
+                        {verdict.issues.includes("MISSING_DATE") ? (
+                          <StatusBadge tone="warn">date unknown · kept empty</StatusBadge>
+                        ) : null}
+                      </div>
+                    ) : verdict.missingDateOnly ? (
+                      <div className="space-y-1">
+                        <StatusBadge tone="warn">waiting on missing-date support</StatusBadge>
+                        <p className="max-w-[240px] text-[11px] text-muted-foreground">
+                          Everything else is complete. The source never stated a date, so this row
+                          can only be committed after the missing-date update is deployed.
+                        </p>
+                      </div>
                     ) : (
                       <div className="space-y-1">
                         <IssueBadges issues={verdict.issues} />
@@ -562,6 +694,7 @@ function BatchPage() {
                         </p>
                       </div>
                     )}
+
                     {isUnsupportedTxnType(txnType) ? (
                       <StatusBadge tone="bad" className="mt-1">
                         corporate action not interpreted
@@ -621,7 +754,7 @@ function Reconciliation({ batchId, portfolioId }: { batchId: string; portfolioId
   const claims = useMemo(() => readHoldingsClaim(batchId), [batchId]);
 
   const holdings = useQuery({
-    queryKey: ["reconcile", portfolioId],
+    queryKey: ["reconcile", portfolioId, claims?.length ?? 0],
     enabled: Boolean(claims && claims.length > 0),
     queryFn: async () => {
       const { data, error } = await supabase
@@ -630,20 +763,30 @@ function Reconciliation({ batchId, portfolioId }: { batchId: string; portfolioId
         .eq("portfolio_id", portfolioId);
       if (error) throw new Error(error.message);
       const rows = (data ?? []) as CurrentHolding[];
-      const ids = rows.map((row) => row.security_id);
-      const securities = ids.length
-        ? await supabase.from("securities").select("id,primary_symbol").in("id", ids)
-        : { data: [], error: null };
-      if (securities.error) throw new Error(securities.error.message);
-      const symbolById = new Map(
-        ((securities.data ?? []) as Pick<Security, "id" | "primary_symbol">[]).map((s) => [s.id, s.primary_symbol]),
-      );
-      const bySymbol = new Map<string, CurrentHolding>();
-      for (const row of rows) {
-        const symbol = symbolById.get(row.security_id) ?? null;
-        if (symbol) bySymbol.set(symbol.toUpperCase(), row);
-      }
-      return bySymbol;
+      const bySecurity = new Map<string, CurrentHolding>();
+      for (const row of rows) bySecurity.set(row.security_id, row);
+
+      // The sheet's ticker text is resolved through the same deterministic
+      // identity rules the import uses (exact ISIN, exact exchange+symbol,
+      // exact supported alias). Nothing is matched loosely.
+      const inputs = (claims ?? []).map((claim) => ({
+        isin: null,
+        exchange: null,
+        securityText: claim.ticker,
+      }));
+      const index = await buildMasterIndex(supabase, inputs);
+      const resolved = (claims ?? []).map((claim, i) => {
+        const candidates = resolveCandidates(index, inputs[i]!);
+        const unique = candidates.securities.length === 1 ? candidates.securities[0]! : null;
+        return {
+          ticker: claim.ticker,
+          netUnits: claim.netUnits,
+          security: unique,
+          ambiguous: candidates.securities.length > 1,
+          derived: unique ? (bySecurity.get(unique.id) ?? null) : null,
+        };
+      });
+      return resolved;
     },
   });
 
@@ -654,7 +797,8 @@ function Reconciliation({ batchId, portfolioId }: { batchId: string; portfolioId
       <h2 className="text-sm font-semibold text-foreground">Comparison with the holdings sheet</h2>
       <p className="mt-1 text-xs text-muted-foreground">
         The sheet's own unit counts next to the units derived from your committed transactions. The
-        derived figure is the accounting truth; a difference means the sheet and the ledger disagree.
+        derived figure is the accounting truth; a difference means the sheet and the ledger
+        disagree.
       </p>
       {holdings.isLoading ? <LoadingState label="Comparing" /> : null}
       {holdings.error ? <ErrorState error={holdings.error} /> : null}
@@ -664,28 +808,39 @@ function Reconciliation({ batchId, portfolioId }: { batchId: string; portfolioId
             <thead className="sticky top-0 bg-muted/60 text-left font-mono uppercase tracking-wider text-muted-foreground">
               <tr>
                 <th className="px-3 py-2">Ticker</th>
+                <th className="px-3 py-2">Matched security</th>
                 <th className="px-3 py-2 text-right">Sheet units</th>
                 <th className="px-3 py-2 text-right">Derived units</th>
                 <th className="px-3 py-2">Status</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {claims.map((claim) => {
-                const derivedRow = holdings.data!.get(claim.ticker);
-                const derivedValue = derivedRow?.net_quantity ?? null;
+              {holdings.data.map((entry) => {
+                const derivedValue = entry.derived?.net_quantity ?? null;
                 const same =
-                  claim.netUnits !== null &&
+                  entry.netUnits !== null &&
                   derivedValue !== null &&
-                  Number(claim.netUnits) === Number(derivedValue);
+                  Number(entry.netUnits) === Number(derivedValue);
                 return (
-                  <tr key={claim.ticker}>
-                    <td className="px-3 py-1.5 font-mono">{claim.ticker}</td>
-                    <td className="px-3 py-1.5 text-right font-mono">{claim.netUnits ?? "—"}</td>
+                  <tr key={entry.ticker}>
+                    <td className="px-3 py-1.5 font-mono">{entry.ticker}</td>
+                    <td className="px-3 py-1.5">
+                      {entry.security ? (
+                        <span className="font-mono text-[11px]">{entry.security.name}</span>
+                      ) : entry.ambiguous ? (
+                        <StatusBadge tone="warn">ambiguous ticker</StatusBadge>
+                      ) : (
+                        <StatusBadge tone="neutral">no unique match</StatusBadge>
+                      )}
+                    </td>
+                    <td className="px-3 py-1.5 text-right font-mono">{entry.netUnits ?? "—"}</td>
                     <td className="px-3 py-1.5 text-right font-mono">
                       {derivedValue ?? "UNAVAILABLE"}
                     </td>
                     <td className="px-3 py-1.5">
-                      {derivedValue === null ? (
+                      {!entry.security ? (
+                        <StatusBadge tone="neutral">not compared</StatusBadge>
+                      ) : derivedValue === null ? (
                         <StatusBadge tone="neutral">not derived</StatusBadge>
                       ) : same ? (
                         <StatusBadge tone="ok">matches</StatusBadge>
