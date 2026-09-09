@@ -52,6 +52,21 @@ with the difference. Rows that cannot be compared (undated or unassigned trades 
 pending) are labelled INSUFFICIENT_DATA rather than showing a false match. No prices,
 values or profit figures from the workbook are displayed as app facts.
 
+## Manual trade entry
+
+Currently trades can only come from a file. A new "Add trade" form is added on the
+import screen and the dashboard:
+
+- Fields: date (required — but empty stays NULL and the trade is held, never
+  guessed), buy/sell, security (picked with the same deterministic search and
+  explicit confirmation as imports), units, price, charges, broker account.
+- A manual entry goes through the exact same trusted path as files: it is staged in a
+  batch of format MANUAL, validated, confirmed and committed by the existing commit
+  step. No direct writing of trades, no separate bookkeeping route.
+- Each manual entry gets its own small batch so its history stays traceable; the
+  batch is labelled "Manual entry" with the entry time.
+- Broker account can be created inline, exactly as in file imports.
+
 ## Explicitly not included
 
 Cost basis, average buy price, invested/current value, profit and loss, sector and
@@ -66,8 +81,10 @@ actions remain unhandled.
   TRANSACTIONS headers, blank-row filter, bulk fix helpers.
 - `src/lib/security-resolution.ts`: optional ISIN hint from STOCKMASTER, exact match
   only, still SUGGESTED until confirmed.
-- `src/routes/_app.import.index.tsx`: sheet picker, skipped-row count, broker mapping.
+- `src/routes/_app.import.index.tsx`: sheet picker, skipped-row count, broker mapping,
+  "Add trade" form creating a MANUAL batch.
 - `src/routes/_app.import.$batchId.tsx`: per-row incomplete reasons, bulk fills,
   reconciliation table.
 - Tests: blank-row filtering, mapping detection, undated rows never eligible,
-  missing-account flagging, reconciliation differences, ISIN-assisted matching.
+  missing-account flagging, reconciliation differences, ISIN-assisted matching,
+  manual entry staging and commit parity with file imports.
