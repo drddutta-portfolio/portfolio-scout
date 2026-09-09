@@ -107,6 +107,13 @@ actions remain unhandled.
   "Add trade" form creating a MANUAL batch.
 - `src/routes/_app.import.$batchId.tsx`: per-row incomplete reasons, bulk fills,
   reconciliation table.
+- `src/routes/_app.transactions.tsx`: ledger list, filters, staged-row edit/delete,
+  correction and reversal dialogs, per-trade history. Corrections/reversals are new
+  ledger rows created through the same trusted commit path (REVERSAL/ADJUSTMENT
+  types already in the enum); no direct UPDATE or DELETE on committed rows, matching
+  the immutability guard in Migration 05.
+- Nav: "Transactions" added to the app shell between Holdings and Import.
 - Tests: blank-row filtering, mapping detection, undated rows never eligible,
   missing-account flagging, reconciliation differences, ISIN-assisted matching,
-  manual entry staging and commit parity with file imports.
+  manual entry staging and commit parity, staged edit/delete, correction and reversal
+  producing correct derived holdings and intact history.
