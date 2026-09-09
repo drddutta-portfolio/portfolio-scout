@@ -165,7 +165,10 @@ export function isUnsupportedTxnType(type: TxnType | null): boolean {
 export interface RowVerdict {
   issues: DataQualityIssue[];
   dataQualityState: DataQualityState;
+  /** Commit-eligible under the currently available backend rules. */
   ready: boolean;
+  /** The only thing missing is the trade date; every other fact is complete. */
+  missingDateOnly: boolean;
   blockingReasons: string[];
 }
 
@@ -180,13 +183,25 @@ export interface RowFacts {
   currency: string | null;
 }
 
+export interface EvaluateOptions {
+  /**
+   * Migration 10 lets a row whose only defect is an unknown trade date reach
+   * the ledger as INCOMPLETE + MISSING_DATE. Until M10 is deployed this stays
+   * false and a missing date keeps blocking the commit, exactly as today.
+   */
+  allowMissingDate?: boolean;
+}
+
 /** Applies the deployed backend's own rules; never softens them. */
-export function evaluateRow(facts: RowFacts): RowVerdict {
+export function evaluateRow(facts: RowFacts, options: EvaluateOptions = {}): RowVerdict {
+  const allowMissingDate = options.allowMissingDate === true;
   const issues: DataQualityIssue[] = [];
   const blocking: string[] = [];
   let needsReview = false;
+  let otherBlocking = 0;
 
   if (!facts.securityResolved) {
+    otherBlocking += 1;
     if (facts.securityAmbiguous) {
       issues.push("AMBIGUOUS_SECURITY");
       needsReview = true;
@@ -201,39 +216,50 @@ export function evaluateRow(facts: RowFacts): RowVerdict {
   }
   if (!facts.brokerAccountId) {
     issues.push("MISSING_ACCOUNT");
+    otherBlocking += 1;
     blocking.push("No broker account chosen.");
   }
   if (!facts.tradeDate) {
     issues.push("MISSING_DATE");
-    blocking.push("Trade date could not be read from the source.");
+    if (!allowMissingDate) {
+      blocking.push("Trade date could not be read from the source.");
+    }
   }
   if (!facts.quantity) {
     issues.push("MISSING_QUANTITY");
+    otherBlocking += 1;
     blocking.push("Quantity could not be read from the source.");
   }
   if (!facts.txnType) {
     issues.push("OTHER");
     needsReview = true;
+    otherBlocking += 1;
     blocking.push("Transaction type is not recognised.");
   } else if (isUnsupportedTxnType(facts.txnType)) {
     issues.push("UNSUPPORTED_CORPORATE_ACTION");
     needsReview = true;
+    otherBlocking += 1;
     blocking.push(`${facts.txnType} has no deterministic meaning yet; exclude the row.`);
   }
   if (!facts.currency) {
     issues.push("OTHER");
+    otherBlocking += 1;
     blocking.push("Currency is not stated.");
   }
 
   const unique = Array.from(new Set(issues));
-  const ready = unique.length === 0;
+  const missingBrokerOnlyNote = unique.filter((i) => i !== "MISSING_BROKER" && i !== "MISSING_DATE");
+  const missingDateOnly = !facts.tradeDate && otherBlocking === 0 && missingBrokerOnlyNote.length === 0;
+  const ready = otherBlocking === 0 && (facts.tradeDate !== null || allowMissingDate);
   return {
     issues: unique,
-    dataQualityState: ready ? "VALID" : needsReview ? "NEEDS_REVIEW" : "INCOMPLETE",
+    dataQualityState: unique.length === 0 ? "VALID" : needsReview ? "NEEDS_REVIEW" : "INCOMPLETE",
     ready,
+    missingDateOnly,
     blockingReasons: blocking,
   };
 }
+
 
 export function fingerprint(parts: (string | null)[]): string {
   return parts.map((p) => (p ?? "~").toString().toUpperCase()).join("|").slice(0, 200);
