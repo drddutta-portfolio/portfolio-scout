@@ -257,6 +257,55 @@ function ImportPage() {
               </div>
             </section>
 
+            {mapping.txn_type === undefined || mapping.date === undefined ? (
+              <section className="rounded-lg border border-border bg-card p-5">
+                <h2 className="text-sm font-semibold text-foreground">
+                  2b. Snapshot values for the whole file
+                </h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  This file has no transaction type and/or trade date per row. Choose them yourself
+                  and they will be applied to every row exactly as entered. Nothing is guessed.
+                </p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  {mapping.txn_type === undefined ? (
+                    <div className="space-y-1.5">
+                      <Label>Transaction type for all rows</Label>
+                      <Select
+                        value={snapshotType === "" ? NONE : snapshotType}
+                        onValueChange={(value) =>
+                          setSnapshotType(value === NONE ? "" : (value as TxnType))
+                        }
+                      >
+                        <SelectTrigger className="h-9">
+                          <SelectValue placeholder="Choose a type" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NONE}>Leave empty</SelectItem>
+                          {SUPPORTED_TXN_TYPES.map((type) => (
+                            <SelectItem key={type} value={type}>
+                              {type}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ) : null}
+                  {mapping.date === undefined ? (
+                    <div className="space-y-1.5">
+                      <Label htmlFor="snapshot-date">Date for all rows</Label>
+                      <input
+                        id="snapshot-date"
+                        type="date"
+                        value={snapshotDate}
+                        onChange={(event) => setSnapshotDate(event.target.value)}
+                        className="h-9 w-full rounded border border-border bg-background px-2 text-sm"
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+            ) : null}
+
             <section className="rounded-lg border border-border bg-card p-5">
               <h2 className="text-sm font-semibold text-foreground">3. Preview</h2>
               <div className="mt-3 overflow-x-auto rounded border border-border">
