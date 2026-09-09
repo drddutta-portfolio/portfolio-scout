@@ -81,8 +81,10 @@ actions remain unhandled.
   TRANSACTIONS headers, blank-row filter, bulk fix helpers.
 - `src/lib/security-resolution.ts`: optional ISIN hint from STOCKMASTER, exact match
   only, still SUGGESTED until confirmed.
-- `src/routes/_app.import.index.tsx`: sheet picker, skipped-row count, broker mapping.
+- `src/routes/_app.import.index.tsx`: sheet picker, skipped-row count, broker mapping,
+  "Add trade" form creating a MANUAL batch.
 - `src/routes/_app.import.$batchId.tsx`: per-row incomplete reasons, bulk fills,
   reconciliation table.
 - Tests: blank-row filtering, mapping detection, undated rows never eligible,
-  missing-account flagging, reconciliation differences, ISIN-assisted matching.
+  missing-account flagging, reconciliation differences, ISIN-assisted matching,
+  manual entry staging and commit parity with file imports.
