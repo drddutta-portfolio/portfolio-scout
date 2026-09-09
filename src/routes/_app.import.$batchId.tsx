@@ -349,6 +349,24 @@ function BatchPage() {
     });
   }
 
+  /** Sets aside every row that is not complete, so the rest can be committed. */
+  function excludeBlocked() {
+    setChoices((prev) => {
+      const next = { ...prev };
+      for (const item of derived) {
+        if (item.choice.excluded || item.verdict.ready) continue;
+        next[item.row.id] = {
+          securityId: next[item.row.id]?.securityId ?? null,
+          brokerAccountId: next[item.row.id]?.brokerAccountId ?? null,
+          excluded: true,
+        };
+      }
+      return next;
+    });
+  }
+
+
+
   return (
     <>
       <PageHeader
