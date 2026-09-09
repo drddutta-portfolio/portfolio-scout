@@ -362,9 +362,12 @@ function BatchPage() {
       />
 
       {isCommitted ? (
-        <div className="mb-4 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-400">
-          This batch is committed. Its interpretation is now frozen.
-        </div>
+        <>
+          <div className="mb-4 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-400">
+            This batch is committed. Its interpretation is now frozen.
+          </div>
+          <Reconciliation batchId={batchId} portfolioId={batch.portfolio_id} />
+        </>
       ) : null}
 
       <section className="mb-4 grid gap-3 rounded-lg border border-border bg-card p-4 sm:grid-cols-2 xl:grid-cols-4">
