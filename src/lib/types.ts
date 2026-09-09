@@ -1,5 +1,5 @@
 /**
- * Row shapes for the deployed PortfolioAI backend (Migrations 01-09a).
+ * Row shapes for the deployed PortfolioAI backend.
  * Read-only mirror of the SQL contract; nothing here changes the database.
  */
 
@@ -139,6 +139,32 @@ export interface CurrentHolding {
   non_valid_txn_count: number;
   first_trade_date: string | null;
   last_trade_date: string | null;
+}
+
+export interface PortfolioHoldingSnapshot {
+  id: string;
+  owner_id: string;
+  portfolio_id: string;
+  security_id: string;
+  source_ticker: string;
+  source_company_name: string | null;
+  net_units_claim: string | null;
+  avg_buy_price: string | null;
+  invested_value: string | null;
+  spreadsheet_current_price: string | null;
+  spreadsheet_current_value: string | null;
+  spreadsheet_unrealized_pl: string | null;
+  spreadsheet_unrealized_pct: string | null;
+  spreadsheet_realized_pl: string | null;
+  spreadsheet_realized_pct: string | null;
+  sector: string | null;
+  market_cap: string | null;
+  cap_category: string | null;
+  source_filename: string;
+  source_file_sha256: string;
+  snapshot_as_of_date: string | null;
+  imported_at: string;
+  updated_at: string;
 }
 
 export interface PortfolioSecuritySetting {
