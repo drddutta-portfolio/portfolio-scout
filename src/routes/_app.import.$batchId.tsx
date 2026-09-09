@@ -610,3 +610,96 @@ function Stat({ label, value }: { label: string; value: number }) {
     </div>
   );
 }
+
+/**
+ * Compares the holdings sheet that came with the workbook against the units
+ * actually derived from the committed ledger. The sheet is never treated as a
+ * fact: it is only shown side by side so differences are visible.
+ */
+function Reconciliation({ batchId, portfolioId }: { batchId: string; portfolioId: string }) {
+  const supabase = useSupabase();
+  const claims = useMemo(() => readHoldingsClaim(batchId), [batchId]);
+
+  const holdings = useQuery({
+    queryKey: ["reconcile", portfolioId],
+    enabled: Boolean(claims && claims.length > 0),
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("current_holdings")
+        .select("*")
+        .eq("portfolio_id", portfolioId);
+      if (error) throw new Error(error.message);
+      const rows = (data ?? []) as CurrentHolding[];
+      const ids = rows.map((row) => row.security_id);
+      const securities = ids.length
+        ? await supabase.from("securities").select("id,symbol").in("id", ids)
+        : { data: [], error: null };
+      if (securities.error) throw new Error(securities.error.message);
+      const symbolById = new Map(
+        ((securities.data ?? []) as Pick<Security, "id" | "symbol">[]).map((s) => [s.id, s.symbol]),
+      );
+      const bySymbol = new Map<string, CurrentHolding>();
+      for (const row of rows) {
+        const symbol = symbolById.get(row.security_id);
+        if (symbol) bySymbol.set(symbol.toUpperCase(), row);
+      }
+      return bySymbol;
+    },
+  });
+
+  if (!claims || claims.length === 0) return null;
+
+  return (
+    <section className="mb-4 rounded-lg border border-border bg-card p-5">
+      <h2 className="text-sm font-semibold text-foreground">Comparison with the holdings sheet</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        The sheet's own unit counts next to the units derived from your committed transactions. The
+        derived figure is the accounting truth; a difference means the sheet and the ledger disagree.
+      </p>
+      {holdings.isLoading ? <LoadingState label="Comparing" /> : null}
+      {holdings.error ? <ErrorState error={holdings.error} /> : null}
+      {holdings.data ? (
+        <div className="mt-3 max-h-80 overflow-auto rounded border border-border">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-muted/60 text-left font-mono uppercase tracking-wider text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2">Ticker</th>
+                <th className="px-3 py-2 text-right">Sheet units</th>
+                <th className="px-3 py-2 text-right">Derived units</th>
+                <th className="px-3 py-2">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {claims.map((claim) => {
+                const derivedRow = holdings.data!.get(claim.ticker);
+                const derivedValue = derivedRow?.net_quantity ?? null;
+                const same =
+                  claim.netUnits !== null &&
+                  derivedValue !== null &&
+                  Number(claim.netUnits) === Number(derivedValue);
+                return (
+                  <tr key={claim.ticker}>
+                    <td className="px-3 py-1.5 font-mono">{claim.ticker}</td>
+                    <td className="px-3 py-1.5 text-right font-mono">{claim.netUnits ?? "—"}</td>
+                    <td className="px-3 py-1.5 text-right font-mono">
+                      {derivedValue ?? "UNAVAILABLE"}
+                    </td>
+                    <td className="px-3 py-1.5">
+                      {derivedValue === null ? (
+                        <StatusBadge tone="neutral">not derived</StatusBadge>
+                      ) : same ? (
+                        <StatusBadge tone="ok">matches</StatusBadge>
+                      ) : (
+                        <StatusBadge tone="bad">differs</StatusBadge>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </section>
+  );
+}
