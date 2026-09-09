@@ -280,6 +280,23 @@ function BatchPage() {
     onError: (err: Error) => toast.error(err.message),
   });
 
+  /**
+   * Staged rows are still just source evidence, so a row entered by mistake
+   * can be removed outright. Once a row is committed it belongs to the ledger
+   * and can no longer be deleted here.
+   */
+  const removeRow = useMutation({
+    mutationFn: async (rowId: string) => {
+      const { error } = await supabase.from("import_source_rows").delete().eq("id", rowId);
+      if (error) throw new Error(error.message);
+    },
+    onSuccess: () => {
+      toast.success("Row removed from the batch");
+      void queryClient.invalidateQueries({ queryKey: ["batch-rows", batchId] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
   if (batchQuery.isLoading || rowsQuery.isLoading) return <LoadingState label="Loading the batch" />;
   if (batchQuery.error) return <ErrorState error={batchQuery.error} />;
   if (rowsQuery.error) return <ErrorState error={rowsQuery.error} />;
