@@ -207,3 +207,27 @@ export interface ImportSourceRow {
   duplicate_of_row_id: string | null;
   duplicate_reason: string | null;
 }
+
+/** Mirrors public.transactions (Migration 05). Read-only in the browser. */
+export interface Transaction {
+  id: string;
+  owner_id: string;
+  portfolio_id: string;
+  broker_account_id: string | null;
+  security_id: string;
+  txn_type: TxnType;
+  trade_date: string | null;
+  quantity: string | null;
+  unit_price: string | null;
+  gross_amount: string | null;
+  total_charges: string | null;
+  currency: string;
+  txn_state: "ACTIVE" | "SUPERSEDED" | "REVERSED";
+  data_quality_state: DataQualityState;
+  data_quality_issues: DataQualityIssue[];
+  source_system: string | null;
+  source_reference: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}

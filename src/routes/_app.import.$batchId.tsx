@@ -28,6 +28,7 @@ import {
   parseSourceDate,
   parseSourceNumber,
   parseTxnType,
+  readHoldingsClaim,
 } from "@/lib/import-logic";
 import {
   buildMasterIndex,
@@ -35,7 +36,14 @@ import {
   resolveCandidates,
   type Candidates,
 } from "@/lib/security-resolution";
-import type { Broker, BrokerAccount, ImportBatch, ImportSourceRow, Security } from "@/lib/types";
+import type {
+  Broker,
+  BrokerAccount,
+  CurrentHolding,
+  ImportBatch,
+  ImportSourceRow,
+  Security,
+} from "@/lib/types";
 import { useSupabase } from "@/providers/auth";
 
 export const Route = createFileRoute("/_app/import/$batchId")({
@@ -272,6 +280,23 @@ function BatchPage() {
     onError: (err: Error) => toast.error(err.message),
   });
 
+  /**
+   * Staged rows are still just source evidence, so a row entered by mistake
+   * can be removed outright. Once a row is committed it belongs to the ledger
+   * and can no longer be deleted here.
+   */
+  const removeRow = useMutation({
+    mutationFn: async (rowId: string) => {
+      const { error } = await supabase.from("import_source_rows").delete().eq("id", rowId);
+      if (error) throw new Error(error.message);
+    },
+    onSuccess: () => {
+      toast.success("Row removed from the batch");
+      void queryClient.invalidateQueries({ queryKey: ["batch-rows", batchId] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
   if (batchQuery.isLoading || rowsQuery.isLoading) return <LoadingState label="Loading the batch" />;
   if (batchQuery.error) return <ErrorState error={batchQuery.error} />;
   if (rowsQuery.error) return <ErrorState error={rowsQuery.error} />;
@@ -324,6 +349,24 @@ function BatchPage() {
     });
   }
 
+  /** Sets aside every row that is not complete, so the rest can be committed. */
+  function excludeBlocked() {
+    setChoices((prev) => {
+      const next = { ...prev };
+      for (const item of derived) {
+        if (item.choice.excluded || item.verdict.ready) continue;
+        next[item.row.id] = {
+          securityId: next[item.row.id]?.securityId ?? null,
+          brokerAccountId: next[item.row.id]?.brokerAccountId ?? null,
+          excluded: true,
+        };
+      }
+      return next;
+    });
+  }
+
+
+
   return (
     <>
       <PageHeader
@@ -337,9 +380,12 @@ function BatchPage() {
       />
 
       {isCommitted ? (
-        <div className="mb-4 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-400">
-          This batch is committed. Its interpretation is now frozen.
-        </div>
+        <>
+          <div className="mb-4 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-400">
+            This batch is committed. Its interpretation is now frozen.
+          </div>
+          <Reconciliation batchId={batchId} portfolioId={batch.portfolio_id} />
+        </>
       ) : null}
 
       <section className="mb-4 grid gap-3 rounded-lg border border-border bg-card p-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -378,6 +424,9 @@ function BatchPage() {
           </div>
           <Button variant="outline" onClick={confirmAllSuggestions}>
             Confirm all single suggestions
+          </Button>
+          <Button variant="outline" onClick={excludeBlocked} disabled={blockedCount === 0}>
+            Exclude {blockedCount} incomplete rows
           </Button>
           <Button variant="ghost" onClick={() => setShowAccounts((v) => !v)}>
             {showAccounts ? "Hide" : "Add"} broker account
@@ -520,14 +569,25 @@ function BatchPage() {
                     ) : null}
                   </td>
                   <td className="px-3 py-3 text-right">
-                    {!isCommitted ? (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setChoice(row.id, { excluded: !choice.excluded })}
-                      >
-                        {choice.excluded ? "Include" : "Exclude"}
-                      </Button>
+                    {!isCommitted && row.resolution !== "COMMITTED" ? (
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setChoice(row.id, { excluded: !choice.excluded })}
+                        >
+                          {choice.excluded ? "Include" : "Exclude"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive"
+                          disabled={removeRow.isPending}
+                          onClick={() => removeRow.mutate(row.id)}
+                        >
+                          Delete
+                        </Button>
+                      </div>
                     ) : null}
                   </td>
                 </tr>
@@ -548,5 +608,98 @@ function Stat({ label, value }: { label: string; value: number }) {
       </p>
       <p className="mt-1 font-mono text-xl text-foreground">{value}</p>
     </div>
+  );
+}
+
+/**
+ * Compares the holdings sheet that came with the workbook against the units
+ * actually derived from the committed ledger. The sheet is never treated as a
+ * fact: it is only shown side by side so differences are visible.
+ */
+function Reconciliation({ batchId, portfolioId }: { batchId: string; portfolioId: string }) {
+  const supabase = useSupabase();
+  const claims = useMemo(() => readHoldingsClaim(batchId), [batchId]);
+
+  const holdings = useQuery({
+    queryKey: ["reconcile", portfolioId],
+    enabled: Boolean(claims && claims.length > 0),
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("current_holdings")
+        .select("*")
+        .eq("portfolio_id", portfolioId);
+      if (error) throw new Error(error.message);
+      const rows = (data ?? []) as CurrentHolding[];
+      const ids = rows.map((row) => row.security_id);
+      const securities = ids.length
+        ? await supabase.from("securities").select("id,primary_symbol").in("id", ids)
+        : { data: [], error: null };
+      if (securities.error) throw new Error(securities.error.message);
+      const symbolById = new Map(
+        ((securities.data ?? []) as Pick<Security, "id" | "primary_symbol">[]).map((s) => [s.id, s.primary_symbol]),
+      );
+      const bySymbol = new Map<string, CurrentHolding>();
+      for (const row of rows) {
+        const symbol = symbolById.get(row.security_id) ?? null;
+        if (symbol) bySymbol.set(symbol.toUpperCase(), row);
+      }
+      return bySymbol;
+    },
+  });
+
+  if (!claims || claims.length === 0) return null;
+
+  return (
+    <section className="mb-4 rounded-lg border border-border bg-card p-5">
+      <h2 className="text-sm font-semibold text-foreground">Comparison with the holdings sheet</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        The sheet's own unit counts next to the units derived from your committed transactions. The
+        derived figure is the accounting truth; a difference means the sheet and the ledger disagree.
+      </p>
+      {holdings.isLoading ? <LoadingState label="Comparing" /> : null}
+      {holdings.error ? <ErrorState error={holdings.error} /> : null}
+      {holdings.data ? (
+        <div className="mt-3 max-h-80 overflow-auto rounded border border-border">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-muted/60 text-left font-mono uppercase tracking-wider text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2">Ticker</th>
+                <th className="px-3 py-2 text-right">Sheet units</th>
+                <th className="px-3 py-2 text-right">Derived units</th>
+                <th className="px-3 py-2">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {claims.map((claim) => {
+                const derivedRow = holdings.data!.get(claim.ticker);
+                const derivedValue = derivedRow?.net_quantity ?? null;
+                const same =
+                  claim.netUnits !== null &&
+                  derivedValue !== null &&
+                  Number(claim.netUnits) === Number(derivedValue);
+                return (
+                  <tr key={claim.ticker}>
+                    <td className="px-3 py-1.5 font-mono">{claim.ticker}</td>
+                    <td className="px-3 py-1.5 text-right font-mono">{claim.netUnits ?? "—"}</td>
+                    <td className="px-3 py-1.5 text-right font-mono">
+                      {derivedValue ?? "UNAVAILABLE"}
+                    </td>
+                    <td className="px-3 py-1.5">
+                      {derivedValue === null ? (
+                        <StatusBadge tone="neutral">not derived</StatusBadge>
+                      ) : same ? (
+                        <StatusBadge tone="ok">matches</StatusBadge>
+                      ) : (
+                        <StatusBadge tone="bad">differs</StatusBadge>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </section>
   );
 }

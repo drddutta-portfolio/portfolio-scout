@@ -238,3 +238,114 @@ export function evaluateRow(facts: RowFacts): RowVerdict {
 export function fingerprint(parts: (string | null)[]): string {
   return parts.map((p) => (p ?? "~").toString().toUpperCase()).join("|").slice(0, 200);
 }
+
+/* ------------------------------------------------------------------ */
+/* Multi-sheet workbook support                                        */
+/* ------------------------------------------------------------------ */
+
+export type SheetKind = "TRANSACTIONS" | "HOLDINGS" | "STOCKMASTER" | "UNKNOWN";
+
+function has(headers: string[], needle: string): boolean {
+  return headers.some((h) => h.toLowerCase().trim() === needle);
+}
+
+/** Identifies a sheet purely from its headings; never from its position. */
+export function detectSheetKind(name: string, headers: string[]): SheetKind {
+  const label = name.trim().toUpperCase();
+  if (has(headers, "isin code") && has(headers, "symbol")) return "STOCKMASTER";
+  if (has(headers, "net units") && has(headers, "ticker")) return "HOLDINGS";
+  if (has(headers, "buy/sell") || (has(headers, "ticker") && has(headers, "units")))
+    return "TRANSACTIONS";
+  if (label === "TRANSACTIONS" || label === "HOLDINGS" || label === "STOCKMASTER")
+    return label as SheetKind;
+  return "UNKNOWN";
+}
+
+/**
+ * A row carrying no security text and no quantity is filler, not a trade.
+ * Filler rows are dropped before staging and the count is disclosed.
+ */
+export function isFillerRow(
+  row: string[],
+  mapping: Partial<Record<MappableField, number>>,
+): boolean {
+  const cell = (field: MappableField) => {
+    const index = mapping[field];
+    if (index === undefined) return "";
+    return (row[index] ?? "").trim();
+  };
+  const security = cell("security_text");
+  const quantity = cell("quantity");
+  // No security and no quantity means the row carries no trade, whatever else
+  // the spreadsheet computed in its other columns.
+  return security === "" && quantity === "";
+}
+
+export interface HoldingsClaim {
+  ticker: string;
+  netUnits: string | null;
+}
+
+/** Reads the HOLDINGS sheet purely as a claimed unit count for reconciliation. */
+export function parseHoldingsSheet(headers: string[], rows: string[][]): HoldingsClaim[] {
+  const tickerIndex = headers.findIndex((h) => h.toLowerCase().trim() === "ticker");
+  const unitsIndex = headers.findIndex((h) => h.toLowerCase().trim() === "net units");
+  if (tickerIndex < 0 || unitsIndex < 0) return [];
+  const out: HoldingsClaim[] = [];
+  for (const row of rows) {
+    const ticker = (row[tickerIndex] ?? "").trim().toUpperCase();
+    if (!ticker) continue;
+    out.push({ ticker, netUnits: parseSourceNumber(row[unitsIndex] ?? null) });
+  }
+  return out;
+}
+
+export interface StockMasterEntry {
+  symbol: string;
+  isin: string | null;
+  name: string | null;
+}
+
+/** Reads STOCKMASTER as matching evidence only. Nothing is written to the master. */
+export function parseStockMaster(
+  headers: string[],
+  rows: string[][],
+): Map<string, StockMasterEntry> {
+  const idx = (needle: string) => headers.findIndex((h) => h.toLowerCase().trim() === needle);
+  const symbolIndex = idx("symbol");
+  const isinIndex = idx("isin code");
+  const nameIndex = idx("company name");
+  const map = new Map<string, StockMasterEntry>();
+  if (symbolIndex < 0) return map;
+  for (const row of rows) {
+    const symbol = (row[symbolIndex] ?? "").trim().toUpperCase();
+    if (!symbol) continue;
+    const isinRaw = isinIndex >= 0 ? (row[isinIndex] ?? "").trim().toUpperCase() : "";
+    map.set(symbol, {
+      symbol,
+      isin: /^[A-Z]{2}[A-Z0-9]{9}\d$/.test(isinRaw) ? isinRaw : null,
+      name: nameIndex >= 0 ? (row[nameIndex] ?? "").trim() || null : null,
+    });
+  }
+  return map;
+}
+
+/* Browser-only reconciliation snapshot (never a ledger fact). */
+const SNAPSHOT_PREFIX = "portfolioai.holdings-claim.";
+
+export function storeHoldingsClaim(batchId: string, claims: HoldingsClaim[]) {
+  try {
+    localStorage.setItem(SNAPSHOT_PREFIX + batchId, JSON.stringify(claims));
+  } catch {
+    /* storage unavailable: reconciliation is simply not offered */
+  }
+}
+
+export function readHoldingsClaim(batchId: string): HoldingsClaim[] | null {
+  try {
+    const raw = localStorage.getItem(SNAPSHOT_PREFIX + batchId);
+    return raw ? (JSON.parse(raw) as HoldingsClaim[]) : null;
+  } catch {
+    return null;
+  }
+}

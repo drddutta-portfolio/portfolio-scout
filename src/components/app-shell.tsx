@@ -1,5 +1,5 @@
 import { Link, useRouterState, useNavigate } from "@tanstack/react-router";
-import { ChevronDown, LayoutDashboard, ListTree, LogOut, Settings, Upload } from "lucide-react";
+import { ChevronDown, LayoutDashboard, ListTree, LogOut, Receipt, Settings, Upload } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import { usePortfolios } from "@/providers/portfolio";
 const NAV = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/holdings", label: "Holdings", icon: ListTree },
+  { to: "/transactions", label: "Transactions", icon: Receipt },
   { to: "/import", label: "Import", icon: Upload },
   { to: "/settings", label: "Settings", icon: Settings },
 ] as const;

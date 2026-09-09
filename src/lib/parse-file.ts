@@ -11,14 +11,19 @@ import * as XLSX from "@e965/xlsx";
 
 export type SourceFormat = "CSV" | "XLSX" | "XLS";
 
+export interface ParsedSheet {
+  name: string;
+  headers: string[];
+  rows: string[][];
+}
+
 export interface ParsedFile {
   fileName: string;
   format: SourceFormat;
   mimeType: string;
   sizeBytes: number;
   sha256: string;
-  headers: string[];
-  rows: string[][];
+  sheets: ParsedSheet[];
 }
 
 export function detectFormat(fileName: string): SourceFormat | null {
@@ -53,10 +58,27 @@ export async function parseSpreadsheet(file: File): Promise<ParsedFile> {
     codepage: 65001,
   });
 
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) throw new Error("The file contains no worksheet.");
-  const sheet = workbook.Sheets[sheetName]!;
+  const sheets: ParsedSheet[] = [];
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+    const parsed = sheetToTable(sheet, sheetName);
+    if (parsed) sheets.push(parsed);
+  }
 
+  if (sheets.length === 0) throw new Error("The file contains no readable rows.");
+
+  return {
+    fileName: file.name,
+    format,
+    mimeType: file.type || "application/octet-stream",
+    sizeBytes: file.size,
+    sha256,
+    sheets,
+  };
+}
+
+function sheetToTable(sheet: XLSX.WorkSheet, name: string): ParsedSheet | null {
   const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
     header: 1,
     raw: false,
@@ -68,7 +90,7 @@ export async function parseSpreadsheet(file: File): Promise<ParsedFile> {
     .map((row) => (Array.isArray(row) ? row.map(cellToText) : []))
     .filter((row) => row.some((cell) => cell !== ""));
 
-  if (cleaned.length === 0) throw new Error("The file contains no rows.");
+  if (cleaned.length === 0) return null;
 
   const headerRow = cleaned[0]!;
   const width = cleaned.reduce((max, row) => Math.max(max, row.length), 0);
@@ -81,15 +103,7 @@ export async function parseSpreadsheet(file: File): Promise<ParsedFile> {
     .slice(1)
     .map((row) => Array.from({ length: width }, (_, i) => row[i] ?? ""));
 
-  return {
-    fileName: file.name,
-    format,
-    mimeType: file.type || "application/octet-stream",
-    sizeBytes: file.size,
-    sha256,
-    headers,
-    rows,
-  };
+  return { name, headers, rows };
 }
 
 function cellToText(cell: unknown): string {
