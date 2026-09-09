@@ -67,6 +67,28 @@ import screen and the dashboard:
   batch is labelled "Manual entry" with the entry time.
 - Broker account can be created inline, exactly as in file imports.
 
+## Transactions page (new route `/transactions`)
+
+A full list of every trade in the selected portfolio: date, buy/sell, security,
+units, price, charges, broker account, and where it came from (file name or manual
+entry). Filters by security, broker account, type and date range; undated trades are
+grouped at the top so they are easy to find.
+
+Editing and removal follow the rule already approved for the ledger — a finalised
+trade is never silently rewritten:
+
+- Still under review (staged, not finalised): edit any field or delete the row
+  outright. Nothing has entered the record yet.
+- Already finalised: "Correct this trade" captures the corrected figures and records
+  a correcting entry; "Remove this trade" records a reversal. In both cases the list
+  shows the corrected position by default, with the original entry visible under
+  "history" for that trade, and holdings recompute automatically.
+- Every correction and reversal asks for a short reason, shown in the history.
+
+This keeps a complete, auditable trail while behaving like ordinary edit and delete.
+
+
+
 ## Explicitly not included
 
 Cost basis, average buy price, invested/current value, profit and loss, sector and
@@ -85,6 +107,13 @@ actions remain unhandled.
   "Add trade" form creating a MANUAL batch.
 - `src/routes/_app.import.$batchId.tsx`: per-row incomplete reasons, bulk fills,
   reconciliation table.
+- `src/routes/_app.transactions.tsx`: ledger list, filters, staged-row edit/delete,
+  correction and reversal dialogs, per-trade history. Corrections/reversals are new
+  ledger rows created through the same trusted commit path (REVERSAL/ADJUSTMENT
+  types already in the enum); no direct UPDATE or DELETE on committed rows, matching
+  the immutability guard in Migration 05.
+- Nav: "Transactions" added to the app shell between Holdings and Import.
 - Tests: blank-row filtering, mapping detection, undated rows never eligible,
   missing-account flagging, reconciliation differences, ISIN-assisted matching,
-  manual entry staging and commit parity with file imports.
+  manual entry staging and commit parity, staged edit/delete, correction and reversal
+  producing correct derived holdings and intact history.
