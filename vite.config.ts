@@ -7,12 +7,13 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
-  // Migration 10 was deployed to the dedicated PortfolioAI Supabase project on
-  // 2026-09-09. Missing trade dates are now a supported, explicitly incomplete
-  // ledger state, so the import review can enable that path permanently.
+  // M10 and M11 are deployed to the dedicated PortfolioAI Supabase project.
+  // Missing dates and genuinely unstated source brokers are supported only as
+  // explicitly INCOMPLETE ledger states; neither fact is ever invented.
   vite: {
     define: {
       "import.meta.env.VITE_M10_NULL_DATE_COMMIT": JSON.stringify("true"),
+      "import.meta.env.VITE_M11_NULL_BROKER_COMMIT": JSON.stringify("true"),
     },
   },
   tanstackStart: {
