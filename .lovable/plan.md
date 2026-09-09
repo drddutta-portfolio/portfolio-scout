@@ -67,6 +67,28 @@ import screen and the dashboard:
   batch is labelled "Manual entry" with the entry time.
 - Broker account can be created inline, exactly as in file imports.
 
+## Transactions page (new route `/transactions`)
+
+A full list of every trade in the selected portfolio: date, buy/sell, security,
+units, price, charges, broker account, and where it came from (file name or manual
+entry). Filters by security, broker account, type and date range; undated trades are
+grouped at the top so they are easy to find.
+
+Editing and removal follow the rule already approved for the ledger — a finalised
+trade is never silently rewritten:
+
+- Still under review (staged, not finalised): edit any field or delete the row
+  outright. Nothing has entered the record yet.
+- Already finalised: "Correct this trade" captures the corrected figures and records
+  a correcting entry; "Remove this trade" records a reversal. In both cases the list
+  shows the corrected position by default, with the original entry visible under
+  "history" for that trade, and holdings recompute automatically.
+- Every correction and reversal asks for a short reason, shown in the history.
+
+This keeps a complete, auditable trail while behaving like ordinary edit and delete.
+
+
+
 ## Explicitly not included
 
 Cost basis, average buy price, invested/current value, profit and loss, sector and
