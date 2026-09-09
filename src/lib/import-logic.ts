@@ -276,8 +276,9 @@ export function isFillerRow(
   };
   const security = cell("security_text");
   const quantity = cell("quantity");
-  if (security !== "" || quantity !== "") return false;
-  return row.every((value) => (value ?? "").trim() === "");
+  // No security and no quantity means the row carries no trade, whatever else
+  // the spreadsheet computed in its other columns.
+  return security === "" && quantity === "";
 }
 
 export interface HoldingsClaim {
