@@ -64,6 +64,14 @@ interface MarketPriceCacheResponse {
   prices?: MarketPriceCacheRow[];
 }
 
+interface RefreshResult {
+  runId?: string;
+  fetched?: number;
+  cached?: number;
+  unresolved?: number;
+  failed?: number;
+}
+
 interface HoldingRow {
   holding: CurrentHolding | null;
   snapshot: PortfolioHoldingSnapshot | null;
@@ -158,6 +166,38 @@ function HoldingsPage() {
 
       return { rows, snapshotStoreAvailable: !snapshotStoreMissing };
     },
+  });
+
+  const refreshPrices = useMutation({
+    mutationFn: async (): Promise<RefreshResult> => {
+      if (!portfolioId) throw new Error("No active portfolio.");
+      const { data, error } = await supabase.functions.invoke("refresh-market-data", {
+        body: { action: "REFRESH", portfolioId },
+      });
+      if (error) {
+        const context = (error as { context?: Response }).context;
+        if (context) {
+          try {
+            const body = (await context.json()) as { error?: string };
+            if (body.error) throw new Error(body.error);
+          } catch (parseError) {
+            if (parseError instanceof Error && parseError.message !== "Unexpected end of JSON input") {
+              throw parseError;
+            }
+          }
+        }
+        throw new Error(error.message);
+      }
+      return (data ?? {}) as RefreshResult;
+    },
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ["holdings-pro", portfolioId] });
+      await queryClient.invalidateQueries({ queryKey: ["dashboard", portfolioId] });
+      toast.success(
+        `Angel One refreshed: ${result.fetched ?? 0} fetched · ${result.cached ?? 0} cached · ${result.unresolved ?? 0} unresolved · ${result.failed ?? 0} failed`,
+      );
+    },
+    onError: (error: Error) => toast.error(error.message),
   });
 
   const setRole = useMutation({
@@ -304,9 +344,17 @@ function HoldingsPage() {
     <>
       <PageHeader
         title="Holdings"
-        description="Professional consolidated holdings view. Ledger quantities remain authoritative; cached Angel One prices are used when available, with spreadsheet valuation retained as the fallback source."
+        description="Professional consolidated holdings view. Ledger quantities remain authoritative; fresh or cached Angel One prices are used when available, with spreadsheet valuation retained as the fallback source."
         actions={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={refreshPrices.isPending || !portfolioId}
+              onClick={() => refreshPrices.mutate()}
+            >
+              {refreshPrices.isPending ? "Refreshing prices…" : "Refresh Angel One prices"}
+            </Button>
             <Button asChild size="sm" variant="outline"><Link to="/import">Import transactions</Link></Button>
             <Label htmlFor="holdings-snapshot-file" className="cursor-pointer">
               <span className="inline-flex h-9 items-center rounded-md border border-border bg-background px-3 text-sm font-medium text-foreground hover:bg-muted/40">
