@@ -210,9 +210,9 @@ Deno.serve(async (request) => {
       const sampleSecurityIds = requestedSecuritySample(body.securityIds)
       const { data: portfolio, error: portfolioError } = await admin
         .from("portfolios")
-        .select("id,user_id")
+        .select("id,owner_id")
         .eq("id", body.portfolioId)
-        .eq("user_id", userData.user.id)
+        .eq("owner_id", userData.user.id)
         .single()
       if (portfolioError || !portfolio) return json(404, { error: "Portfolio not found." })
 
@@ -395,9 +395,9 @@ Deno.serve(async (request) => {
     const sampleSecurityIds = requestedSecuritySample(body.securityIds)
     const { data: portfolio, error: portfolioError } = await admin
       .from("portfolios")
-      .select("id,user_id")
+      .select("id,owner_id")
       .eq("id", body.portfolioId)
-      .eq("user_id", userData.user.id)
+      .eq("owner_id", userData.user.id)
       .single()
     if (portfolioError || !portfolio) return json(404, { error: "Portfolio not found." })
 
