@@ -4,6 +4,7 @@ import {
   DEFAULT_CACHE_TTL_SECONDS,
   isFresh,
   MARKET_DATA_PROVIDER,
+  type LatestPriceObservation,
   type ProviderInstrument,
 } from "./_shared/market-data.ts"
 import { mapAngelInstruments } from "./_shared/instrument-mapping.ts"
@@ -20,19 +21,6 @@ interface RefreshRequest {
   readonly securityIds?: unknown
 }
 
-function requestedSecuritySample(value: unknown): readonly string[] | null {
-  const parsed = parseSampleSecurityIds(value)
-  if (!parsed.specified) return null
-  if (!parsed.valid) {
-    throw new SafeOperationalError(
-      "INVALID_SECURITY_SAMPLE",
-      "securityIds must contain between one and five UUIDs.",
-      400,
-    )
-  }
-  return parsed.ids
-}
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -47,6 +35,26 @@ interface AdminClient {
     name: string,
     parameters: Readonly<Record<string, unknown>>,
   ): PromiseLike<{ data: unknown; error: { message: string } | null }>
+}
+
+function json(status: number, body: Readonly<Record<string, unknown>>) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  })
+}
+
+function requestedSecuritySample(value: unknown): readonly string[] | null {
+  const parsed = parseSampleSecurityIds(value)
+  if (!parsed.specified) return null
+  if (!parsed.valid) {
+    throw new SafeOperationalError(
+      "INVALID_SECURITY_SAMPLE",
+      "securityIds must contain between one and five UUIDs.",
+      400,
+    )
+  }
+  return parsed.ids
 }
 
 async function acquireLease(
@@ -68,6 +76,7 @@ async function acquireLease(
       "Market-data operation could not be started.",
     )
   }
+
   const result = Array.isArray(data)
     ? data[0] as { acquired?: unknown; retry_after?: unknown } | undefined
     : undefined
@@ -102,11 +111,22 @@ async function releaseLease(
   }
 }
 
-function json(status: number, body: Readonly<Record<string, unknown>>) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  })
+function extendedQuoteProvenance(item: LatestPriceObservation) {
+  return {
+    ...item.provenance,
+    full_quote: {
+      net_change: item.netChange,
+      percent_change: item.percentChange,
+      average_price: item.averagePrice,
+      trade_volume: item.tradeVolume,
+      total_buy_quantity: item.totalBuyQuantity,
+      total_sell_quantity: item.totalSellQuantity,
+      lower_circuit: item.lowerCircuit,
+      upper_circuit: item.upperCircuit,
+      week_52_low: item.week52Low,
+      week_52_high: item.week52High,
+    },
+  }
 }
 
 Deno.serve(async (request) => {
@@ -130,7 +150,9 @@ Deno.serve(async (request) => {
       auth: { persistSession: false },
     })
     const { data: userData, error: userError } = await userClient.auth.getUser()
-    if (userError || !userData.user) return json(401, { error: "Invalid authenticated session." })
+    if (userError || !userData.user) {
+      return json(401, { error: "Invalid authenticated session." })
+    }
 
     if (body.action === "READ_CACHE") {
       if (!Array.isArray(body.securityIds) || body.securityIds.some((value) => typeof value !== "string")) {
@@ -142,7 +164,7 @@ Deno.serve(async (request) => {
       const [priceResult, mappingResult] = await Promise.all([
         userClient
           .from("market_price_latest")
-          .select("security_id,price,currency,price_timestamp,retrieved_at,provider_code,market_session_status,previous_close,day_open,day_high,day_low,net_change,percent_change,average_price,trade_volume,total_buy_quantity,total_sell_quantity,lower_circuit,upper_circuit,week_52_low,week_52_high")
+          .select("security_id,price,currency,price_timestamp,retrieved_at,provider_code,market_session_status,previous_close,day_open,day_high,day_low,provenance")
           .eq("provider_code", MARKET_DATA_PROVIDER)
           .in("security_id", securityIds),
         userClient
@@ -173,32 +195,24 @@ Deno.serve(async (request) => {
           dayOpen: price.day_open === null ? null : String(price.day_open),
           dayHigh: price.day_high === null ? null : String(price.day_high),
           dayLow: price.day_low === null ? null : String(price.day_low),
-          netChange: price.net_change === null ? null : String(price.net_change),
-          percentChange: price.percent_change === null ? null : String(price.percent_change),
-          averagePrice: price.average_price === null ? null : String(price.average_price),
-          tradeVolume: price.trade_volume === null ? null : String(price.trade_volume),
-          totalBuyQuantity: price.total_buy_quantity === null ? null : String(price.total_buy_quantity),
-          totalSellQuantity: price.total_sell_quantity === null ? null : String(price.total_sell_quantity),
-          lowerCircuit: price.lower_circuit === null ? null : String(price.lower_circuit),
-          upperCircuit: price.upper_circuit === null ? null : String(price.upper_circuit),
-          week52Low: price.week_52_low === null ? null : String(price.week_52_low),
-          week52High: price.week_52_high === null ? null : String(price.week_52_high),
+          provenance: price.provenance,
         })),
         unresolvedSecurityIds: securityIds.filter((id) => !verifiedIds.has(id)),
       })
     }
+
+    const admin = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
 
     if (body.action === "SYNC_MAPPINGS") {
       if (typeof body.portfolioId !== "string") {
         return json(400, { error: "portfolioId must be a UUID string." })
       }
       const sampleSecurityIds = requestedSecuritySample(body.securityIds)
-      const admin = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
       const { data: portfolio, error: portfolioError } = await admin
         .from("portfolios")
-        .select("id,owner_id")
+        .select("id,user_id")
         .eq("id", body.portfolioId)
-        .eq("owner_id", userData.user.id)
+        .eq("user_id", userData.user.id)
         .single()
       if (portfolioError || !portfolio) return json(404, { error: "Portfolio not found." })
 
@@ -207,11 +221,15 @@ Deno.serve(async (request) => {
       try {
         const { data: holdings, error: holdingsError } = await admin
           .from("current_holdings")
-          .select("security_id")
+          .select("security_id,current_quantity")
           .eq("portfolio_id", portfolio.id)
         if (holdingsError) throw holdingsError
 
-        const openSecurityIds = [...new Set((holdings ?? []).map((holding) => holding.security_id))]
+        const openSecurityIds = [...new Set(
+          (holdings ?? [])
+            .filter((holding) => Number(holding.current_quantity) > 0)
+            .map((holding) => holding.security_id),
+        )]
         const openSecurityIdSet = new Set(openSecurityIds)
         if (sampleSecurityIds?.some((securityId) => !openSecurityIdSet.has(securityId))) {
           throw new SafeOperationalError(
@@ -225,7 +243,7 @@ Deno.serve(async (request) => {
         const { data: securities, error: securitiesError } = securityIds.length
           ? await admin
             .from("securities")
-            .select("id,primary_symbol,exchange,asset_class")
+            .select("id,symbol,exchange,asset_class")
             .in("id", securityIds)
           : { data: [], error: null }
         if (securitiesError) throw securitiesError
@@ -243,10 +261,10 @@ Deno.serve(async (request) => {
         }
         const master = await masterResponse.json() as readonly Readonly<Record<string, unknown>>[]
         const canonical = (securities ?? []).flatMap((security) => {
-          if (!security.primary_symbol || !security.exchange) return []
+          if (!security.symbol || !security.exchange) return []
           return [{
             id: security.id,
-            primarySymbol: security.primary_symbol,
+            primarySymbol: security.symbol,
             exchange: security.exchange,
             assetClass: security.asset_class,
           }]
@@ -333,22 +351,24 @@ Deno.serve(async (request) => {
           if (upsertError) throw upsertError
         }
 
-        await admin.from("market_data_refresh_runs").insert({
-          owner_id: portfolio.owner_id,
+        const unresolvedCount =
+          accepted.filter((mapping) => mapping.mappingStatus !== "VERIFIED").length + quarantined.length
+        const mappedCount = accepted.filter((mapping) => mapping.mappingStatus === "VERIFIED").length
+        const { error: auditError } = await admin.from("market_data_refresh_runs").insert({
           portfolio_id: portfolio.id,
           provider_code: MARKET_DATA_PROVIDER,
-          operation: "SYNC_MAPPINGS",
           requested_by: userData.user.id,
           status: "SUCCEEDED",
           requested_security_count: securityIds.length,
-          unresolved_security_count:
-            accepted.filter((mapping) => mapping.mappingStatus !== "VERIFIED").length + quarantined.length,
-          fetched_security_count: accepted.filter((mapping) => mapping.mappingStatus === "VERIFIED").length,
+          unresolved_security_count: unresolvedCount,
+          fetched_security_count: mappedCount,
           completed_at: new Date().toISOString(),
+          metadata: { operation: "SYNC_MAPPINGS" },
         })
+        if (auditError) throw auditError
 
         return json(200, {
-          mapped: accepted.filter((mapping) => mapping.mappingStatus === "VERIFIED").length,
+          mapped: mappedCount,
           ambiguous: accepted.filter((mapping) => mapping.mappingStatus === "AMBIGUOUS").length,
           unresolved: accepted.filter((mapping) => mapping.mappingStatus === "UNRESOLVED").length,
           quarantined: quarantined.length,
@@ -373,12 +393,11 @@ Deno.serve(async (request) => {
     }
 
     const sampleSecurityIds = requestedSecuritySample(body.securityIds)
-    const admin = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
     const { data: portfolio, error: portfolioError } = await admin
       .from("portfolios")
-      .select("id,owner_id")
+      .select("id,user_id")
       .eq("id", body.portfolioId)
-      .eq("owner_id", userData.user.id)
+      .eq("user_id", userData.user.id)
       .single()
     if (portfolioError || !portfolio) return json(404, { error: "Portfolio not found." })
 
@@ -387,10 +406,15 @@ Deno.serve(async (request) => {
     try {
       const { data: holdings, error: holdingsError } = await admin
         .from("current_holdings")
-        .select("security_id")
+        .select("security_id,current_quantity")
         .eq("portfolio_id", portfolio.id)
       if (holdingsError) throw holdingsError
-      const openSecurityIds = [...new Set((holdings ?? []).map((holding) => holding.security_id))]
+
+      const openSecurityIds = [...new Set(
+        (holdings ?? [])
+          .filter((holding) => Number(holding.current_quantity) > 0)
+          .map((holding) => holding.security_id),
+      )]
       const openSecurityIdSet = new Set(openSecurityIds)
       if (sampleSecurityIds?.some((securityId) => !openSecurityIdSet.has(securityId))) {
         throw new SafeOperationalError(
@@ -444,20 +468,23 @@ Deno.serve(async (request) => {
       const { data: run, error: runError } = await admin
         .from("market_data_refresh_runs")
         .insert({
-          owner_id: portfolio.owner_id,
           portfolio_id: portfolio.id,
           provider_code: MARKET_DATA_PROVIDER,
-          operation: "REFRESH_PRICES",
           requested_by: userData.user.id,
-          status: toFetch.length ? "RUNNING" : "SKIPPED_FRESH",
+          status: toFetch.length ? "RUNNING" : "SUCCEEDED",
           requested_security_count: targetSecurityIds.length,
           cached_security_count: verified.length - toFetch.length,
           unresolved_security_count: unresolved,
           completed_at: toFetch.length ? null : new Date().toISOString(),
+          metadata: {
+            operation: "REFRESH_PRICES",
+            skipped_fresh: !toFetch.length,
+          },
         })
         .select("id")
         .single()
       if (runError) throw runError
+
       if (!toFetch.length) {
         return json(200, {
           runId: run.id,
@@ -487,17 +514,7 @@ Deno.serve(async (request) => {
                 day_open: item.dayOpen,
                 day_high: item.dayHigh,
                 day_low: item.dayLow,
-                net_change: item.netChange,
-                percent_change: item.percentChange,
-                average_price: item.averagePrice,
-                trade_volume: item.tradeVolume,
-                total_buy_quantity: item.totalBuyQuantity,
-                total_sell_quantity: item.totalSellQuantity,
-                lower_circuit: item.lowerCircuit,
-                upper_circuit: item.upperCircuit,
-                week_52_low: item.week52Low,
-                week_52_high: item.week52High,
-                provenance: item.provenance,
+                provenance: extendedQuoteProvenance(item),
               })),
               { onConflict: "security_id,provider_code" },
             )
@@ -505,7 +522,7 @@ Deno.serve(async (request) => {
         }
 
         const failed = toFetch.length - observations.length
-        await admin
+        const { error: finishError } = await admin
           .from("market_data_refresh_runs")
           .update({
             status: failed ? "PARTIAL" : "SUCCEEDED",
@@ -514,6 +531,7 @@ Deno.serve(async (request) => {
             failed_security_count: failed,
           })
           .eq("id", run.id)
+        if (finishError) throw finishError
 
         return json(200, {
           runId: run.id,
