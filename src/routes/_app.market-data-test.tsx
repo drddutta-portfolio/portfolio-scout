@@ -15,7 +15,7 @@ export const Route = createFileRoute("/_app/market-data-test")({
   component: MarketDataTestPage,
 });
 
-const EXPECTED_PORTFOLIO_ID = "6193a4aa-3235-4057-bddc-209fcf443fc2";
+const EXPECTED_PORTFOLIO_ID = "0033a8c9-03d5-4fcf-a64e-edf279957f72";
 
 const SAMPLE_SECURITIES = [
   { symbol: "360ONE", id: "b68c6f9d-5881-4ca8-a9b6-b00d266f778f" },
@@ -92,7 +92,7 @@ function MarketDataTestPage() {
           </div>
 
           <p className="mt-4 text-sm text-muted-foreground">
-            This test always targets the approved portfolio above, regardless of the portfolio selected in the UI. The Edge Function independently verifies that the portfolio belongs to your authenticated user and that every sampled security is a current holding. Angel One credentials remain only in Supabase Edge Function Secrets.
+            This test always targets the approved Consolidated portfolio above. The Edge Function independently verifies portfolio ownership and confirms every sampled security is a current holding. Angel One credentials remain only in Supabase Edge Function Secrets.
           </p>
 
           <Button
