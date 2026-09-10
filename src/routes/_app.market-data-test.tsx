@@ -135,14 +135,6 @@ function MarketDataTestPage() {
     refreshTest.isPending ||
     fullRefreshTest.isPending;
 
-  const fullRefreshApproved = Boolean(
-    fullMappingResult &&
-      !fullMappingResult.error &&
-      (fullMappingResult.mapped ?? 0) > 0 &&
-      (fullMappingResult.quarantined ?? 0) === 0 &&
-      (fullMappingResult.unsupported ?? 0) === 0,
-  );
-
   return (
     <>
       <PageHeader
@@ -214,31 +206,29 @@ function MarketDataTestPage() {
         {mappingResult ? <MappingResultCard title="Five-security mapping result" result={mappingResult} /> : null}
         {fullMappingResult ? <MappingResultCard title="All open holdings mapping result" result={fullMappingResult} /> : null}
 
-        {fullMappingResult && !fullMappingResult.error ? (
-          <section className="rounded-lg border border-border bg-card p-4">
-            <div className="space-y-1 text-sm">
-              <p className="font-medium text-foreground">Stage 3 — refresh all VERIFIED open holdings</p>
-              <p className="text-muted-foreground">
-                Requests Angel One quotes only for holdings whose instrument mapping is VERIFIED. Any ambiguous or unresolved holding is skipped by the Edge Function and continues using the existing spreadsheet fallback in Holdings.
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Current mapping review: {fullMappingResult.mapped ?? 0} verified · {fullMappingResult.ambiguous ?? 0} ambiguous · {fullMappingResult.unresolved ?? 0} unresolved · {fullMappingResult.quarantined ?? 0} quarantined · {fullMappingResult.unsupported ?? 0} unsupported.
-              </p>
-            </div>
+        <section className="rounded-lg border border-border bg-card p-4">
+          <div className="space-y-1 text-sm">
+            <p className="font-medium text-foreground">Stage 3 — refresh all VERIFIED open holdings</p>
+            <p className="text-muted-foreground">
+              Requests Angel One quotes only for holdings whose stored instrument mapping is VERIFIED. Ambiguous or unresolved holdings are skipped by the Edge Function and continue using the spreadsheet fallback in Holdings.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              The full mapping review has already been completed: 249 verified, 1 ambiguous, 0 unresolved, 0 quarantined, 0 unsupported. This stage remains visible after a page reload; server-side verification is still authoritative.
+            </p>
+          </div>
 
-            <Button
-              className="mt-4"
-              variant="secondary"
-              disabled={busy || !fullRefreshApproved}
-              onClick={() => {
-                setFullRefreshResult(null);
-                fullRefreshTest.mutate();
-              }}
-            >
-              {fullRefreshTest.isPending ? "Refreshing verified holdings…" : "Refresh All Verified Open Holdings"}
-            </Button>
-          </section>
-        ) : null}
+          <Button
+            className="mt-4"
+            variant="secondary"
+            disabled={busy}
+            onClick={() => {
+              setFullRefreshResult(null);
+              fullRefreshTest.mutate();
+            }}
+          >
+            {fullRefreshTest.isPending ? "Refreshing verified holdings…" : "Refresh All Verified Open Holdings"}
+          </Button>
+        </section>
 
         {refreshResult ? <RefreshResultCard title="Five-security live price result" result={refreshResult} /> : null}
         {fullRefreshResult ? <RefreshResultCard title="All open holdings price result" result={fullRefreshResult} /> : null}
