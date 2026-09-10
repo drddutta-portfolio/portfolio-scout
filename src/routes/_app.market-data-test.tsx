@@ -18,11 +18,11 @@ export const Route = createFileRoute("/_app/market-data-test")({
 const EXPECTED_PORTFOLIO_ID = "0033a8c9-03d5-4fcf-a64e-edf279957f72";
 
 const SAMPLE_SECURITIES = [
-  { symbol: "360ONE", id: "b68c6f9d-5881-4ca8-a9b6-b00d266f778f" },
-  { symbol: "ABCAPITAL", id: "3833b30d-f007-486a-afd4-d44d313f8e99" },
-  { symbol: "ACMESOLAR", id: "5b9171f3-d8cb-4b24-8432-1905b214915a" },
-  { symbol: "AKUMS", id: "89d94355-8c96-4d21-8bb7-1e3bcf096a93" },
-  { symbol: "ALIVUS", id: "de565d84-02de-4e97-a255-43ee56c8650e" },
+  { symbol: "360ONE", id: "89557526-da9a-5906-a767-57ed2c59a122" },
+  { symbol: "ABCAPITAL", id: "4f781eb8-a199-5ce8-92bf-bc32b33829ba" },
+  { symbol: "ACMESOLAR", id: "5e9a5c1e-24a8-5aad-820f-93ff02d49294" },
+  { symbol: "AKUMS", id: "bbbf0618-bf76-5421-9b6d-b699e247cb53" },
+  { symbol: "ALIVUS", id: "0a4c3072-bd59-5883-a4a6-162e9d34d93d" },
 ] as const;
 
 interface MappingResult {
