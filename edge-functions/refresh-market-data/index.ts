@@ -355,15 +355,16 @@ Deno.serve(async (request) => {
           accepted.filter((mapping) => mapping.mappingStatus !== "VERIFIED").length + quarantined.length
         const mappedCount = accepted.filter((mapping) => mapping.mappingStatus === "VERIFIED").length
         const { error: auditError } = await admin.from("market_data_refresh_runs").insert({
+          owner_id: userData.user.id,
           portfolio_id: portfolio.id,
           provider_code: MARKET_DATA_PROVIDER,
+          operation: "SYNC_MAPPINGS",
           requested_by: userData.user.id,
           status: "SUCCEEDED",
           requested_security_count: securityIds.length,
           unresolved_security_count: unresolvedCount,
           fetched_security_count: mappedCount,
           completed_at: new Date().toISOString(),
-          metadata: { operation: "SYNC_MAPPINGS" },
         })
         if (auditError) throw auditError
 
@@ -468,18 +469,16 @@ Deno.serve(async (request) => {
       const { data: run, error: runError } = await admin
         .from("market_data_refresh_runs")
         .insert({
+          owner_id: userData.user.id,
           portfolio_id: portfolio.id,
           provider_code: MARKET_DATA_PROVIDER,
+          operation: "REFRESH_PRICES",
           requested_by: userData.user.id,
           status: toFetch.length ? "RUNNING" : "SUCCEEDED",
           requested_security_count: targetSecurityIds.length,
           cached_security_count: verified.length - toFetch.length,
           unresolved_security_count: unresolved,
           completed_at: toFetch.length ? null : new Date().toISOString(),
-          metadata: {
-            operation: "REFRESH_PRICES",
-            skipped_fresh: !toFetch.length,
-          },
         })
         .select("id")
         .single()
