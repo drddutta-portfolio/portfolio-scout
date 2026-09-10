@@ -16,8 +16,31 @@ const TOKEN_PATTERNS = [
 
 export const SAFE_PROVIDER_FAILURE = "Market-data provider request failed."
 
+function diagnosticText(value: unknown): string {
+  if (value instanceof Error) return value.message
+  if (typeof value === "string") return value
+  if (!value || typeof value !== "object") return String(value)
+
+  const record = value as Readonly<Record<string, unknown>>
+  const fields = ["code", "message", "details", "hint", "status", "statusText"] as const
+  const parts = fields.flatMap((field) => {
+    const fieldValue = record[field]
+    return typeof fieldValue === "string" || typeof fieldValue === "number"
+      ? [`${field}=${String(fieldValue)}`]
+      : []
+  })
+
+  if (parts.length) return parts.join(" | ")
+
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return "Unserializable structured error"
+  }
+}
+
 export function redactSensitiveText(value: unknown, secrets: readonly string[] = []): string {
-  let text = value instanceof Error ? value.message : typeof value === "string" ? value : "Unknown error"
+  let text = diagnosticText(value)
   for (const pattern of TOKEN_PATTERNS) text = text.replace(pattern, "$1[REDACTED]")
   for (const secret of secrets) {
     if (secret.length >= 3) text = text.split(secret).join("[REDACTED]")
