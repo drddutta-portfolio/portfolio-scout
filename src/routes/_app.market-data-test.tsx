@@ -35,43 +35,68 @@ interface MappingResult {
   code?: string;
 }
 
+interface RefreshResult {
+  runId?: string;
+  fetched?: number;
+  cached?: number;
+  unresolved?: number;
+  failed?: number;
+  error?: string;
+  code?: string;
+}
+
 function MarketDataTestPage() {
   const supabase = useSupabase();
-  const [result, setResult] = useState<MappingResult | null>(null);
+  const [mappingResult, setMappingResult] = useState<MappingResult | null>(null);
+  const [refreshResult, setRefreshResult] = useState<RefreshResult | null>(null);
 
-  const mappingTest = useMutation({
-    mutationFn: async () => {
-      const { data, error } = await supabase.functions.invoke("refresh-market-data", {
-        body: {
-          action: "SYNC_MAPPINGS",
-          portfolioId: EXPECTED_PORTFOLIO_ID,
-          securityIds: SAMPLE_SECURITIES.map((security) => security.id),
-        },
-      });
+  const invoke = async <T,>(action: "SYNC_MAPPINGS" | "REFRESH") => {
+    const { data, error } = await supabase.functions.invoke("refresh-market-data", {
+      body: {
+        action,
+        portfolioId: EXPECTED_PORTFOLIO_ID,
+        securityIds: SAMPLE_SECURITIES.map((security) => security.id),
+      },
+    });
 
-      if (error) {
-        const context = (error as { context?: Response }).context;
-        if (context) {
-          try {
-            const body = (await context.json()) as MappingResult;
-            throw new Error(body.error ?? error.message);
-          } catch (parseError) {
-            if (parseError instanceof Error && parseError.message !== "Unexpected end of JSON input") {
-              throw parseError;
-            }
+    if (error) {
+      const context = (error as { context?: Response }).context;
+      if (context) {
+        try {
+          const body = (await context.json()) as { error?: string };
+          throw new Error(body.error ?? error.message);
+        } catch (parseError) {
+          if (parseError instanceof Error && parseError.message !== "Unexpected end of JSON input") {
+            throw parseError;
           }
         }
-        throw new Error(error.message);
       }
+      throw new Error(error.message);
+    }
 
-      return (data ?? {}) as MappingResult;
-    },
+    return (data ?? {}) as T;
+  };
+
+  const mappingTest = useMutation({
+    mutationFn: () => invoke<MappingResult>("SYNC_MAPPINGS"),
     onSuccess: (data) => {
-      setResult(data);
+      setMappingResult(data);
       toast.success("Angel One mapping test completed");
     },
     onError: (error: Error) => {
-      setResult({ error: error.message });
+      setMappingResult({ error: error.message });
+      toast.error(error.message);
+    },
+  });
+
+  const refreshTest = useMutation({
+    mutationFn: () => invoke<RefreshResult>("REFRESH"),
+    onSuccess: (data) => {
+      setRefreshResult(data);
+      toast.success("Angel One live price test completed");
+    },
+    onError: (error: Error) => {
+      setRefreshResult({ error: error.message });
       toast.error(error.message);
     },
   });
@@ -79,8 +104,8 @@ function MarketDataTestPage() {
   return (
     <>
       <PageHeader
-        title="Angel One Mapping Test"
-        description="Controlled five-security test. This does not request live prices and cannot expand beyond the approved sample."
+        title="Angel One Market Data Test"
+        description="Controlled five-security pilot for verified instrument mapping and live price refresh."
       />
 
       <div className="max-w-3xl space-y-4">
@@ -92,36 +117,70 @@ function MarketDataTestPage() {
           </div>
 
           <p className="mt-4 text-sm text-muted-foreground">
-            This test always targets the approved Consolidated portfolio above. The Edge Function independently verifies portfolio ownership and confirms every sampled security is a current holding. Angel One credentials remain only in Supabase Edge Function Secrets.
+            Both tests are locked to these five current holdings in the Consolidated portfolio. The Edge Function verifies ownership and holdings membership. Angel One credentials remain only in Supabase Edge Function Secrets.
           </p>
 
-          <Button
-            className="mt-4"
-            disabled={mappingTest.isPending}
-            onClick={() => {
-              setResult(null);
-              mappingTest.mutate();
-            }}
-          >
-            {mappingTest.isPending ? "Testing mapping…" : "Test Angel One Mapping"}
-          </Button>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <Button
+              disabled={mappingTest.isPending || refreshTest.isPending}
+              onClick={() => {
+                setMappingResult(null);
+                mappingTest.mutate();
+              }}
+            >
+              {mappingTest.isPending ? "Testing mapping…" : "Test Angel One Mapping"}
+            </Button>
+
+            <Button
+              variant="secondary"
+              disabled={mappingTest.isPending || refreshTest.isPending}
+              onClick={() => {
+                setRefreshResult(null);
+                refreshTest.mutate();
+              }}
+            >
+              {refreshTest.isPending ? "Refreshing prices…" : "Test Live Prices"}
+            </Button>
+          </div>
         </section>
 
-        {result ? (
+        {mappingResult ? (
           <section className="rounded-lg border border-border bg-card p-4">
-            <p className="mb-3 text-sm font-medium text-foreground">Result</p>
-            {result.error ? (
-              <p className="text-sm text-destructive">{result.error}</p>
+            <p className="mb-3 text-sm font-medium text-foreground">Mapping result</p>
+            {mappingResult.error ? (
+              <p className="text-sm text-destructive">{mappingResult.error}</p>
             ) : (
               <div className="grid gap-3 sm:grid-cols-5">
-                <ResultStat label="Mapped" value={result.mapped} />
-                <ResultStat label="Ambiguous" value={result.ambiguous} />
-                <ResultStat label="Unresolved" value={result.unresolved} />
-                <ResultStat label="Quarantined" value={result.quarantined} />
-                <ResultStat label="Unsupported" value={result.unsupported} />
+                <ResultStat label="Mapped" value={mappingResult.mapped} />
+                <ResultStat label="Ambiguous" value={mappingResult.ambiguous} />
+                <ResultStat label="Unresolved" value={mappingResult.unresolved} />
+                <ResultStat label="Quarantined" value={mappingResult.quarantined} />
+                <ResultStat label="Unsupported" value={mappingResult.unsupported} />
               </div>
             )}
-            {result.code ? <p className="mt-3 font-mono text-xs text-muted-foreground">Code: {result.code}</p> : null}
+            {mappingResult.code ? <p className="mt-3 font-mono text-xs text-muted-foreground">Code: {mappingResult.code}</p> : null}
+          </section>
+        ) : null}
+
+        {refreshResult ? (
+          <section className="rounded-lg border border-border bg-card p-4">
+            <p className="mb-3 text-sm font-medium text-foreground">Live price result</p>
+            {refreshResult.error ? (
+              <p className="text-sm text-destructive">{refreshResult.error}</p>
+            ) : (
+              <>
+                <div className="grid gap-3 sm:grid-cols-4">
+                  <ResultStat label="Fetched" value={refreshResult.fetched} />
+                  <ResultStat label="Cached" value={refreshResult.cached} />
+                  <ResultStat label="Unresolved" value={refreshResult.unresolved} />
+                  <ResultStat label="Failed" value={refreshResult.failed} />
+                </div>
+                {refreshResult.runId ? (
+                  <p className="mt-3 font-mono text-xs text-muted-foreground">Run: {refreshResult.runId}</p>
+                ) : null}
+              </>
+            )}
+            {refreshResult.code ? <p className="mt-3 font-mono text-xs text-muted-foreground">Code: {refreshResult.code}</p> : null}
           </section>
         ) : null}
       </div>
