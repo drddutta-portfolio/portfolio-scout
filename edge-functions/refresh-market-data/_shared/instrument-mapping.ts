@@ -35,10 +35,17 @@ function supportedCashInstrument(instrument: AngelInstrument) {
   return (exchange === "NSE" || exchange === "BSE") && expiry === null
 }
 
+function isEqSeries(instrument: AngelInstrument) {
+  const tradingSymbol = text(instrument.symbol)
+  return tradingSymbol?.toUpperCase().endsWith("-EQ") === true
+}
+
 /**
  * Conservative mapping only: canonical exchange + canonical primary_symbol must
  * exactly equal Angel One exch_seg + name. No fuzzy/name similarity or exchange
- * inference is allowed. Unresolved or ambiguous results remain visibly unresolved.
+ * inference is allowed. When that exact identity produces multiple cash-market
+ * candidates, a single -EQ series may be selected because it is the ordinary
+ * listed equity series; otherwise the result remains ambiguous.
  */
 export function mapAngelInstruments(
   securities: readonly CanonicalSecurity[],
@@ -63,12 +70,24 @@ export function mapAngelInstruments(
   return eligible.map((security) => {
     const key = `${security.exchange}:${security.primarySymbol.toUpperCase()}`
     const matches = candidates.get(key) ?? []
+    const eqMatches = matches.filter(isEqSeries)
+    const selectedMatches = matches.length === 1
+      ? matches
+      : eqMatches.length === 1
+        ? eqMatches
+        : matches
+    const usedEqTieBreak = matches.length > 1 && selectedMatches === eqMatches && eqMatches.length === 1
+
     const evidence = {
-      method: "Exact equality of PortfolioAI exchange + primary_symbol to Angel One exch_seg + name",
+      method: usedEqTieBreak
+        ? "Exact equality of PortfolioAI exchange + primary_symbol to Angel One exch_seg + name; unique -EQ series selected from multiple exact cash candidates"
+        : "Exact equality of PortfolioAI exchange + primary_symbol to Angel One exch_seg + name",
       canonical_exchange: security.exchange,
       canonical_symbol: security.primarySymbol,
       instrument_master_retrieved_at: instrumentMasterRetrievedAt,
       candidate_count: matches.length,
+      eq_candidate_count: eqMatches.length,
+      eq_series_tiebreak_used: usedEqTieBreak,
       candidates: matches.slice(0, 10).map((instrument) => ({
         token: text(instrument.token),
         trading_symbol: text(instrument.symbol),
@@ -78,7 +97,7 @@ export function mapAngelInstruments(
       })),
     }
 
-    if (matches.length !== 1) {
+    if (selectedMatches.length !== 1) {
       return {
         securityId: security.id,
         providerInstrumentId: null,
@@ -91,7 +110,7 @@ export function mapAngelInstruments(
       }
     }
 
-    const match = matches[0]!
+    const match = selectedMatches[0]!
     const token = text(match.token)
     const tradingSymbol = text(match.symbol)
     const exchange = text(match.exch_seg)
