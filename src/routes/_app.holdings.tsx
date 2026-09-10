@@ -54,15 +54,29 @@ export const Route = createFileRoute("/_app/holdings")({
   component: HoldingsPage,
 });
 
+interface MarketPriceCacheRow {
+  securityId: string;
+  price: string;
+  retrievedAt: string;
+}
+
+interface MarketPriceCacheResponse {
+  prices?: MarketPriceCacheRow[];
+}
+
 interface HoldingRow {
   holding: CurrentHolding | null;
   snapshot: PortfolioHoldingSnapshot | null;
   security: Security | null;
   setting: PortfolioSecuritySetting | null;
+  marketPrice: MarketPriceCacheRow | null;
 }
 
 type PositionFilter = "ALL" | "OPEN" | "CLOSED" | "MISMATCH";
 type SortMode = "TICKER" | "CURRENT_VALUE" | "UNREALIZED_PCT" | "REALIZED_PL";
+type PriceSource = "LIVE" | "CACHED" | "SHEET" | "UNAVAILABLE";
+
+const ANGEL_FRESH_MS = 5 * 60 * 1000;
 
 function HoldingsPage() {
   const supabase = useSupabase();
@@ -116,6 +130,19 @@ function HoldingsPage() {
         for (const row of (data ?? []) as Security[]) securities.set(row.id, row);
       }
 
+      const marketPrices = new Map<string, MarketPriceCacheRow>();
+      if (securityIds.length) {
+        const { data, error } = await supabase.functions.invoke("refresh-market-data", {
+          body: { action: "READ_CACHE", securityIds },
+        });
+        if (error) {
+          console.warn("Holdings market-data cache unavailable; using spreadsheet fallback.", error.message);
+        } else {
+          const response = (data ?? {}) as MarketPriceCacheResponse;
+          for (const price of response.prices ?? []) marketPrices.set(price.securityId, price);
+        }
+      }
+
       const holdingMap = new Map(holdings.map((row) => [row.security_id, row]));
       const snapshotMap = new Map(snapshots.map((row) => [row.security_id, row]));
       const settingMap = new Map(settings.map((row) => [row.security_id, row]));
@@ -126,6 +153,7 @@ function HoldingsPage() {
         snapshot: snapshotMap.get(securityId) ?? null,
         security: securities.get(securityId) ?? null,
         setting: settingMap.get(securityId) ?? null,
+        marketPrice: marketPrices.get(securityId) ?? null,
       }));
 
       return { rows, snapshotStoreAvailable: !snapshotStoreMissing };
@@ -184,9 +212,6 @@ function HoldingsPage() {
         if (error) throw new Error(error.message);
       }
 
-      // Replace stale snapshot rows only when the entire source HOLDINGS list was
-      // resolved. If some symbols are unresolved, preserve prior rows rather than
-      // silently deleting data that may still need review.
       if (result.unresolvedTickers.length === 0) {
         const { data: existing, error } = await supabase
           .from("portfolio_holding_snapshots")
@@ -222,23 +247,11 @@ function HoldingsPage() {
   });
 
   const rows = query.data?.rows ?? [];
+  const preparedRows = useMemo(() => rows.map((row) => prepareHoldingRow(row)), [rows]);
+
   const enriched = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    const prepared = rows.map((row) => {
-      const ledgerQuantity = row.holding ? nullableNumber(row.holding.net_quantity) : 0;
-      const snapshotQuantity = nullableNumber(row.snapshot?.net_units_claim ?? null);
-      const mismatch =
-        row.snapshot !== null &&
-        ledgerQuantity !== null &&
-        snapshotQuantity !== null &&
-        Math.abs(ledgerQuantity - snapshotQuantity) > 0.00000001;
-      const closed = ledgerQuantity === 0;
-      const ticker = row.snapshot?.source_ticker ?? row.security?.primary_symbol ?? "—";
-      const company = row.snapshot?.source_company_name ?? row.security?.name ?? "Unknown security";
-      return { ...row, ledgerQuantity, snapshotQuantity, mismatch, closed, ticker, company };
-    });
-
-    const filtered = prepared.filter((row) => {
+    const filtered = preparedRows.filter((row) => {
       if (needle && !`${row.ticker} ${row.company} ${row.snapshot?.sector ?? ""}`.toLowerCase().includes(needle)) return false;
       if (positionFilter === "OPEN" && row.closed) return false;
       if (positionFilter === "CLOSED" && !row.closed) return false;
@@ -247,22 +260,28 @@ function HoldingsPage() {
     });
 
     return filtered.sort((a, b) => {
-      if (sortMode === "CURRENT_VALUE") return numberOrZero(b.snapshot?.spreadsheet_current_value) - numberOrZero(a.snapshot?.spreadsheet_current_value);
-      if (sortMode === "UNREALIZED_PCT") return numberOrZero(b.snapshot?.spreadsheet_unrealized_pct) - numberOrZero(a.snapshot?.spreadsheet_unrealized_pct);
+      if (sortMode === "CURRENT_VALUE") return nullableSortDesc(a.currentValue, b.currentValue);
+      if (sortMode === "UNREALIZED_PCT") return nullableSortDesc(a.unrealizedPct, b.unrealizedPct);
       if (sortMode === "REALIZED_PL") return numberOrZero(b.snapshot?.spreadsheet_realized_pl) - numberOrZero(a.snapshot?.spreadsheet_realized_pl);
       return a.ticker.localeCompare(b.ticker);
     });
-  }, [rows, search, positionFilter, sortMode]);
+  }, [preparedRows, search, positionFilter, sortMode]);
 
   const summary = useMemo(() => {
     const snapshotRows = rows.filter((row) => row.snapshot);
+    const valuationRows = preparedRows.filter((row) => row.currentValue !== null);
+    const unrealizedRows = preparedRows.filter((row) => row.unrealized !== null);
     return {
       invested: snapshotRows.reduce((sum, row) => sum + numberOrZero(row.snapshot?.invested_value), 0),
-      currentValue: snapshotRows.reduce((sum, row) => sum + numberOrZero(row.snapshot?.spreadsheet_current_value), 0),
-      unrealized: snapshotRows.reduce((sum, row) => sum + numberOrZero(row.snapshot?.spreadsheet_unrealized_pl), 0),
+      currentValue: valuationRows.reduce((sum, row) => sum + (row.currentValue ?? 0), 0),
+      currentValueCount: valuationRows.length,
+      unrealized: unrealizedRows.reduce((sum, row) => sum + (row.unrealized ?? 0), 0),
+      unrealizedCount: unrealizedRows.length,
       realized: snapshotRows.reduce((sum, row) => sum + numberOrZero(row.snapshot?.spreadsheet_realized_pl), 0),
       open: rows.filter((row) => (row.holding ? nullableNumber(row.holding.net_quantity) : 0) !== 0).length,
       snapshotCount: snapshotRows.length,
+      liveCount: preparedRows.filter((row) => row.priceSource === "LIVE").length,
+      cachedCount: preparedRows.filter((row) => row.priceSource === "CACHED").length,
       mismatches: rows.filter((row) => {
         if (!row.snapshot) return false;
         const ledger = row.holding ? nullableNumber(row.holding.net_quantity) : 0;
@@ -270,7 +289,7 @@ function HoldingsPage() {
         return ledger !== null && claim !== null && Math.abs(ledger - claim) > 0.00000001;
       }).length,
     };
-  }, [rows]);
+  }, [preparedRows, rows]);
 
   if (!activePortfolio) {
     return (
@@ -285,7 +304,7 @@ function HoldingsPage() {
     <>
       <PageHeader
         title="Holdings"
-        description="Professional consolidated holdings view. Ledger quantities remain authoritative; valuation fields currently come from the uploaded spreadsheet snapshot until a live market feed is connected."
+        description="Professional consolidated holdings view. Ledger quantities remain authoritative; cached Angel One prices are used when available, with spreadsheet valuation retained as the fallback source."
         actions={
           <div className="flex gap-2">
             <Button asChild size="sm" variant="outline"><Link to="/import">Import transactions</Link></Button>
@@ -322,14 +341,14 @@ function HoldingsPage() {
 
       {query.data?.snapshotStoreAvailable && summary.snapshotCount === 0 ? (
         <div className="mb-4 rounded-md border border-blue-500/30 bg-blue-500/5 px-4 py-3 text-sm text-muted-foreground">
-          The ledger is ready. Load the same Portfolio-101.xlsx workbook to populate Avg. Buy Price, Invested Value, spreadsheet Current Price/Value, P&L and Sector. These remain source-labelled snapshot fields until live Angel One pricing is connected.
+          The ledger is ready. Load the same Portfolio-101.xlsx workbook to populate Avg. Buy Price, Invested Value, spreadsheet fallback Current Price/Value, P&L and Sector.
         </div>
       ) : null}
 
       <section className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <Kpi label="Invested value" value={summary.snapshotCount ? formatInr(summary.invested) : "—"} />
-        <Kpi label="Current value" value={summary.snapshotCount ? formatInr(summary.currentValue) : "—"} sub="Spreadsheet snapshot" />
-        <Kpi label="Unrealised P/L" value={summary.snapshotCount ? formatSignedInr(summary.unrealized) : "—"} tone={summary.unrealized >= 0 ? "positive" : "negative"} />
+        <Kpi label="Current value" value={summary.currentValueCount ? formatInr(summary.currentValue) : "—"} sub="Angel One when available · sheet fallback" />
+        <Kpi label="Unrealised P/L" value={summary.unrealizedCount ? formatSignedInr(summary.unrealized) : "—"} tone={summary.unrealized >= 0 ? "positive" : "negative"} />
         <Kpi label="Realised P/L" value={summary.snapshotCount ? formatSignedInr(summary.realized) : "—"} tone={summary.realized >= 0 ? "positive" : "negative"} />
         <Kpi label="Open positions" value={String(summary.open)} />
         <Kpi label="Qty mismatches" value={String(summary.mismatches)} tone={summary.mismatches === 0 ? "positive" : "negative"} />
@@ -366,7 +385,7 @@ function HoldingsPage() {
         </div>
         <div className="ml-auto text-right">
           <p className="font-mono text-xs text-muted-foreground">{enriched.length} positions shown</p>
-          {summary.snapshotCount > 0 ? <p className="mt-1 text-[11px] text-muted-foreground">Price source: spreadsheet snapshot · live feed pending</p> : null}
+          <p className="mt-1 text-[11px] text-muted-foreground">Price hierarchy: LIVE → CACHED → SHEET · {summary.liveCount} live · {summary.cachedCount} cached</p>
         </div>
       </section>
 
@@ -401,8 +420,6 @@ function HoldingsPage() {
                 const holding = row.holding;
                 const securityId = row.security?.id ?? snapshot?.security_id ?? holding?.security_id;
                 const nonValid = Number(holding?.non_valid_txn_count ?? 0);
-                const unrealized = nullableNumber(snapshot?.spreadsheet_unrealized_pl ?? null);
-                const unrealizedPct = nullableNumber(snapshot?.spreadsheet_unrealized_pct ?? null);
                 const realized = nullableNumber(snapshot?.spreadsheet_realized_pl ?? null);
                 const realizedPct = nullableNumber(snapshot?.spreadsheet_realized_pct ?? null);
                 return (
@@ -422,15 +439,15 @@ function HoldingsPage() {
                     <MetricCell value={snapshot?.avg_buy_price} kind="inr" />
                     <MetricCell value={snapshot?.invested_value} kind="inr" />
                     <td className="px-3 py-3 text-right">
-                      {snapshot?.spreadsheet_current_price !== null && snapshot?.spreadsheet_current_price !== undefined ? (
-                        <><span className="font-mono">{formatInr(numberOrZero(snapshot.spreadsheet_current_price), 2)}</span><div className="mt-1"><StatusBadge tone="neutral">sheet</StatusBadge></div></>
+                      {row.currentPrice !== null ? (
+                        <><span className="font-mono">{formatInr(row.currentPrice, 2)}</span><div className="mt-1"><PriceSourceBadge source={row.priceSource} /></div></>
                       ) : <span className="text-muted-foreground">—</span>}
                     </td>
-                    <MetricCell value={snapshot?.spreadsheet_current_value} kind="inr" />
-                    <MetricCell value={snapshot?.spreadsheet_unrealized_pl} kind="inr" signed />
-                    <MetricCell value={snapshot?.spreadsheet_unrealized_pct} kind="pct" signed />
-                    <MetricCell value={snapshot?.spreadsheet_realized_pl} kind="inr" signed />
-                    <MetricCell value={snapshot?.spreadsheet_realized_pct} kind="pct" signed />
+                    <NumericMetricCell value={row.currentValue} kind="inr" />
+                    <NumericMetricCell value={row.unrealized} kind="inr" signed />
+                    <NumericMetricCell value={row.unrealizedPct} kind="pct" signed />
+                    <NumericMetricCell value={realized} kind="inr" signed />
+                    <NumericMetricCell value={realizedPct} kind="pct" signed />
                     <td className="max-w-[180px] px-3 py-3 text-xs text-muted-foreground">{snapshot?.sector ?? "—"}</td>
                     <td className="px-3 py-3">
                       <div className="flex max-w-[170px] flex-wrap gap-1">
@@ -462,6 +479,54 @@ function HoldingsPage() {
   );
 }
 
+function prepareHoldingRow(row: HoldingRow) {
+  const ledgerQuantity = row.holding ? nullableNumber(row.holding.net_quantity) : 0;
+  const snapshotQuantity = nullableNumber(row.snapshot?.net_units_claim ?? null);
+  const mismatch = row.snapshot !== null && ledgerQuantity !== null && snapshotQuantity !== null && Math.abs(ledgerQuantity - snapshotQuantity) > 0.00000001;
+  const closed = ledgerQuantity === 0;
+  const ticker = row.snapshot?.source_ticker ?? row.security?.primary_symbol ?? "—";
+  const company = row.snapshot?.source_company_name ?? row.security?.name ?? "Unknown security";
+
+  const angelPrice = nullableNumber(row.marketPrice?.price ?? null);
+  const retrievedAtMs = row.marketPrice?.retrievedAt ? new Date(row.marketPrice.retrievedAt).getTime() : Number.NaN;
+  const angelFresh = Number.isFinite(retrievedAtMs) && Date.now() - retrievedAtMs <= ANGEL_FRESH_MS;
+  const sheetPrice = nullableNumber(row.snapshot?.spreadsheet_current_price ?? null);
+
+  let currentPrice: number | null = null;
+  let priceSource: PriceSource = "UNAVAILABLE";
+  if (angelPrice !== null) {
+    currentPrice = angelPrice;
+    priceSource = angelFresh ? "LIVE" : "CACHED";
+  } else if (sheetPrice !== null) {
+    currentPrice = sheetPrice;
+    priceSource = "SHEET";
+  }
+
+  const investedValue = nullableNumber(row.snapshot?.invested_value ?? null);
+  let currentValue: number | null = null;
+  let unrealized: number | null = null;
+  let unrealizedPct: number | null = null;
+
+  if (priceSource === "LIVE" || priceSource === "CACHED") {
+    currentValue = currentPrice !== null && ledgerQuantity !== null ? currentPrice * ledgerQuantity : null;
+    unrealized = currentValue !== null && investedValue !== null ? currentValue - investedValue : null;
+    unrealizedPct = unrealized !== null && investedValue !== null && investedValue !== 0 ? (unrealized / investedValue) * 100 : null;
+  } else if (priceSource === "SHEET") {
+    currentValue = nullableNumber(row.snapshot?.spreadsheet_current_value ?? null);
+    unrealized = nullableNumber(row.snapshot?.spreadsheet_unrealized_pl ?? null);
+    unrealizedPct = nullableNumber(row.snapshot?.spreadsheet_unrealized_pct ?? null);
+  }
+
+  return { ...row, ledgerQuantity, snapshotQuantity, mismatch, closed, ticker, company, currentPrice, currentValue, unrealized, unrealizedPct, priceSource };
+}
+
+function PriceSourceBadge({ source }: { source: PriceSource }) {
+  if (source === "LIVE") return <StatusBadge tone="ok">LIVE</StatusBadge>;
+  if (source === "CACHED") return <StatusBadge tone="warn">CACHED</StatusBadge>;
+  if (source === "SHEET") return <StatusBadge tone="neutral">SHEET</StatusBadge>;
+  return null;
+}
+
 function Kpi({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: "positive" | "negative" }) {
   return (
     <div className="rounded-lg border border-border bg-card p-4">
@@ -473,10 +538,13 @@ function Kpi({ label, value, sub, tone }: { label: string; value: string; sub?: 
 }
 
 function MetricCell({ value, kind, signed = false }: { value: string | null | undefined; kind: "inr" | "pct"; signed?: boolean }) {
-  const numeric = nullableNumber(value ?? null);
-  if (numeric === null) return <td className="px-3 py-3 text-right text-muted-foreground">—</td>;
-  const text = kind === "pct" ? `${numeric.toFixed(2)}%` : formatInr(numeric, 2);
-  const tone = signed ? (numeric > 0 ? "text-emerald-400" : numeric < 0 ? "text-destructive" : "text-muted-foreground") : "text-foreground";
+  return <NumericMetricCell value={nullableNumber(value ?? null)} kind={kind} signed={signed} />;
+}
+
+function NumericMetricCell({ value, kind, signed = false }: { value: number | null; kind: "inr" | "pct"; signed?: boolean }) {
+  if (value === null) return <td className="px-3 py-3 text-right text-muted-foreground">—</td>;
+  const text = kind === "pct" ? `${value.toFixed(2)}%` : formatInr(value, 2);
+  const tone = signed ? (value > 0 ? "text-emerald-400" : value < 0 ? "text-destructive" : "text-muted-foreground") : "text-foreground";
   return <td className={`px-3 py-3 text-right font-mono ${tone}`}>{text}</td>;
 }
 
@@ -484,6 +552,13 @@ function nullableNumber(value: string | number | null | undefined): number | nul
   if (value === null || value === undefined || value === "") return null;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function nullableSortDesc(a: number | null, b: number | null): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return b - a;
 }
 
 function numberOrZero(value: string | number | null | undefined): number {
