@@ -221,13 +221,13 @@ Deno.serve(async (request) => {
       try {
         const { data: holdings, error: holdingsError } = await admin
           .from("current_holdings")
-          .select("security_id,current_quantity")
+          .select("security_id,net_quantity")
           .eq("portfolio_id", portfolio.id)
         if (holdingsError) throw holdingsError
 
         const openSecurityIds = [...new Set(
           (holdings ?? [])
-            .filter((holding) => Number(holding.current_quantity) > 0)
+            .filter((holding) => Number(holding.net_quantity) > 0)
             .map((holding) => holding.security_id),
         )]
         const openSecurityIdSet = new Set(openSecurityIds)
@@ -243,7 +243,7 @@ Deno.serve(async (request) => {
         const { data: securities, error: securitiesError } = securityIds.length
           ? await admin
             .from("securities")
-            .select("id,symbol,exchange,asset_class")
+            .select("id,primary_symbol,exchange,asset_class")
             .in("id", securityIds)
           : { data: [], error: null }
         if (securitiesError) throw securitiesError
@@ -261,10 +261,10 @@ Deno.serve(async (request) => {
         }
         const master = await masterResponse.json() as readonly Readonly<Record<string, unknown>>[]
         const canonical = (securities ?? []).flatMap((security) => {
-          if (!security.symbol || !security.exchange) return []
+          if (!security.primary_symbol || !security.exchange) return []
           return [{
             id: security.id,
-            primarySymbol: security.symbol,
+            primarySymbol: security.primary_symbol,
             exchange: security.exchange,
             assetClass: security.asset_class,
           }]
@@ -406,13 +406,13 @@ Deno.serve(async (request) => {
     try {
       const { data: holdings, error: holdingsError } = await admin
         .from("current_holdings")
-        .select("security_id,current_quantity")
+        .select("security_id,net_quantity")
         .eq("portfolio_id", portfolio.id)
       if (holdingsError) throw holdingsError
 
       const openSecurityIds = [...new Set(
         (holdings ?? [])
-          .filter((holding) => Number(holding.current_quantity) > 0)
+          .filter((holding) => Number(holding.net_quantity) > 0)
           .map((holding) => holding.security_id),
       )]
       const openSecurityIdSet = new Set(openSecurityIds)
