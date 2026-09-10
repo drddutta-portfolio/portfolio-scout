@@ -311,6 +311,15 @@ function HoldingsPage() {
     const snapshotRows = rows.filter((row) => row.snapshot);
     const valuationRows = preparedRows.filter((row) => row.currentValue !== null);
     const unrealizedRows = preparedRows.filter((row) => row.unrealized !== null);
+    const openRows = preparedRows.filter((row) => !row.closed);
+    const angelRows = openRows.filter((row) => row.marketPrice && nullableNumber(row.marketPrice.price) !== null);
+    const latestAngelRetrievedAt = angelRows.reduce<string | null>((latest, row) => {
+      const candidate = row.marketPrice?.retrievedAt ?? null;
+      if (!candidate || !Number.isFinite(new Date(candidate).getTime())) return latest;
+      if (!latest) return candidate;
+      return new Date(candidate).getTime() > new Date(latest).getTime() ? candidate : latest;
+    }, null);
+
     return {
       invested: snapshotRows.reduce((sum, row) => sum + numberOrZero(row.snapshot?.invested_value), 0),
       currentValue: valuationRows.reduce((sum, row) => sum + (row.currentValue ?? 0), 0),
@@ -318,10 +327,12 @@ function HoldingsPage() {
       unrealized: unrealizedRows.reduce((sum, row) => sum + (row.unrealized ?? 0), 0),
       unrealizedCount: unrealizedRows.length,
       realized: snapshotRows.reduce((sum, row) => sum + numberOrZero(row.snapshot?.spreadsheet_realized_pl), 0),
-      open: rows.filter((row) => (row.holding ? nullableNumber(row.holding.net_quantity) : 0) !== 0).length,
+      open: openRows.length,
       snapshotCount: snapshotRows.length,
       liveCount: preparedRows.filter((row) => row.priceSource === "LIVE").length,
       cachedCount: preparedRows.filter((row) => row.priceSource === "CACHED").length,
+      angelCoverageCount: angelRows.length,
+      latestAngelRetrievedAt,
       mismatches: rows.filter((row) => {
         if (!row.snapshot) return false;
         const ledger = row.holding ? nullableNumber(row.holding.net_quantity) : 0;
@@ -339,6 +350,8 @@ function HoldingsPage() {
       </>
     );
   }
+
+  const marketCoverageComplete = summary.open > 0 && summary.angelCoverageCount === summary.open;
 
   return (
     <>
@@ -379,6 +392,20 @@ function HoldingsPage() {
 
       {query.isLoading ? <LoadingState label="Building holdings terminal" /> : null}
       {query.error ? <ErrorState error={query.error} /> : null}
+
+      {query.data ? (
+        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border border-border bg-card px-4 py-3 text-xs">
+          <span className="font-medium text-foreground">Angel One market data</span>
+          <StatusBadge tone={marketCoverageComplete ? "ok" : summary.angelCoverageCount > 0 ? "warn" : "neutral"}>
+            {marketCoverageComplete ? "COMPLETE" : summary.angelCoverageCount > 0 ? "PARTIAL" : "NO CACHE"}
+          </StatusBadge>
+          <span className="text-muted-foreground">Coverage: {summary.angelCoverageCount}/{summary.open} open positions</span>
+          <span className="text-muted-foreground">
+            Last cache update: {summary.latestAngelRetrievedAt ? formatMarketTimestamp(summary.latestAngelRetrievedAt) : "not available"}
+          </span>
+          <span className="text-muted-foreground">Refresh mode: manual</span>
+        </div>
+      ) : null}
 
       {query.data && !query.data.snapshotStoreAvailable ? (
         <div className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-muted-foreground">
@@ -617,6 +644,16 @@ function trimNumber(value: string | number): string {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return String(value);
   return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 8 }).format(numeric);
+}
+
+function formatMarketTimestamp(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "not available";
+  return new Intl.DateTimeFormat("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "medium",
+    timeZone: "Asia/Kolkata",
+  }).format(date);
 }
 
 function formatInr(value: number, maximumFractionDigits = 0): string {
