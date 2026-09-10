@@ -50,6 +50,7 @@ function MarketDataTestPage() {
   const [mappingResult, setMappingResult] = useState<MappingResult | null>(null);
   const [fullMappingResult, setFullMappingResult] = useState<MappingResult | null>(null);
   const [refreshResult, setRefreshResult] = useState<RefreshResult | null>(null);
+  const [fullRefreshResult, setFullRefreshResult] = useState<RefreshResult | null>(null);
 
   const invoke = async <T,>(action: "SYNC_MAPPINGS" | "REFRESH", scope: "SAMPLE" | "ALL_OPEN") => {
     const body: Record<string, unknown> = {
@@ -116,13 +117,37 @@ function MarketDataTestPage() {
     },
   });
 
-  const busy = mappingTest.isPending || fullMappingTest.isPending || refreshTest.isPending;
+  const fullRefreshTest = useMutation({
+    mutationFn: () => invoke<RefreshResult>("REFRESH", "ALL_OPEN"),
+    onSuccess: (data) => {
+      setFullRefreshResult(data);
+      toast.success("Full verified-holdings price refresh completed");
+    },
+    onError: (error: Error) => {
+      setFullRefreshResult({ error: error.message });
+      toast.error(error.message);
+    },
+  });
+
+  const busy =
+    mappingTest.isPending ||
+    fullMappingTest.isPending ||
+    refreshTest.isPending ||
+    fullRefreshTest.isPending;
+
+  const fullRefreshApproved = Boolean(
+    fullMappingResult &&
+      !fullMappingResult.error &&
+      (fullMappingResult.mapped ?? 0) > 0 &&
+      (fullMappingResult.quarantined ?? 0) === 0 &&
+      (fullMappingResult.unsupported ?? 0) === 0,
+  );
 
   return (
     <>
       <PageHeader
         title="Angel One Market Data Test"
-        description="Verified five-security pilot plus controlled mapping of all current open holdings. Full-portfolio price refresh remains disabled until mapping results are reviewed."
+        description="Verified five-security pilot plus controlled mapping and price refresh for current open holdings. Only VERIFIED mappings are sent for quotes; ambiguous mappings remain unresolved and keep their fallback price."
       />
 
       <div className="max-w-3xl space-y-4">
@@ -178,6 +203,7 @@ function MarketDataTestPage() {
             disabled={busy}
             onClick={() => {
               setFullMappingResult(null);
+              setFullRefreshResult(null);
               fullMappingTest.mutate();
             }}
           >
@@ -188,27 +214,34 @@ function MarketDataTestPage() {
         {mappingResult ? <MappingResultCard title="Five-security mapping result" result={mappingResult} /> : null}
         {fullMappingResult ? <MappingResultCard title="All open holdings mapping result" result={fullMappingResult} /> : null}
 
-        {refreshResult ? (
+        {fullMappingResult && !fullMappingResult.error ? (
           <section className="rounded-lg border border-border bg-card p-4">
-            <p className="mb-3 text-sm font-medium text-foreground">Five-security live price result</p>
-            {refreshResult.error ? (
-              <p className="text-sm text-destructive">{refreshResult.error}</p>
-            ) : (
-              <>
-                <div className="grid gap-3 sm:grid-cols-4">
-                  <ResultStat label="Fetched" value={refreshResult.fetched} />
-                  <ResultStat label="Cached" value={refreshResult.cached} />
-                  <ResultStat label="Unresolved" value={refreshResult.unresolved} />
-                  <ResultStat label="Failed" value={refreshResult.failed} />
-                </div>
-                {refreshResult.runId ? (
-                  <p className="mt-3 font-mono text-xs text-muted-foreground">Run: {refreshResult.runId}</p>
-                ) : null}
-              </>
-            )}
-            {refreshResult.code ? <p className="mt-3 font-mono text-xs text-muted-foreground">Code: {refreshResult.code}</p> : null}
+            <div className="space-y-1 text-sm">
+              <p className="font-medium text-foreground">Stage 3 — refresh all VERIFIED open holdings</p>
+              <p className="text-muted-foreground">
+                Requests Angel One quotes only for holdings whose instrument mapping is VERIFIED. Any ambiguous or unresolved holding is skipped by the Edge Function and continues using the existing spreadsheet fallback in Holdings.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Current mapping review: {fullMappingResult.mapped ?? 0} verified · {fullMappingResult.ambiguous ?? 0} ambiguous · {fullMappingResult.unresolved ?? 0} unresolved · {fullMappingResult.quarantined ?? 0} quarantined · {fullMappingResult.unsupported ?? 0} unsupported.
+              </p>
+            </div>
+
+            <Button
+              className="mt-4"
+              variant="secondary"
+              disabled={busy || !fullRefreshApproved}
+              onClick={() => {
+                setFullRefreshResult(null);
+                fullRefreshTest.mutate();
+              }}
+            >
+              {fullRefreshTest.isPending ? "Refreshing verified holdings…" : "Refresh All Verified Open Holdings"}
+            </Button>
           </section>
         ) : null}
+
+        {refreshResult ? <RefreshResultCard title="Five-security live price result" result={refreshResult} /> : null}
+        {fullRefreshResult ? <RefreshResultCard title="All open holdings price result" result={fullRefreshResult} /> : null}
       </div>
     </>
   );
@@ -228,6 +261,30 @@ function MappingResultCard({ title, result }: { title: string; result: MappingRe
           <ResultStat label="Quarantined" value={result.quarantined} />
           <ResultStat label="Unsupported" value={result.unsupported} />
         </div>
+      )}
+      {result.code ? <p className="mt-3 font-mono text-xs text-muted-foreground">Code: {result.code}</p> : null}
+    </section>
+  );
+}
+
+function RefreshResultCard({ title, result }: { title: string; result: RefreshResult }) {
+  return (
+    <section className="rounded-lg border border-border bg-card p-4">
+      <p className="mb-3 text-sm font-medium text-foreground">{title}</p>
+      {result.error ? (
+        <p className="text-sm text-destructive">{result.error}</p>
+      ) : (
+        <>
+          <div className="grid gap-3 sm:grid-cols-4">
+            <ResultStat label="Fetched" value={result.fetched} />
+            <ResultStat label="Cached" value={result.cached} />
+            <ResultStat label="Unresolved" value={result.unresolved} />
+            <ResultStat label="Failed" value={result.failed} />
+          </div>
+          {result.runId ? (
+            <p className="mt-3 font-mono text-xs text-muted-foreground">Run: {result.runId}</p>
+          ) : null}
+        </>
       )}
       {result.code ? <p className="mt-3 font-mono text-xs text-muted-foreground">Code: {result.code}</p> : null}
     </section>
