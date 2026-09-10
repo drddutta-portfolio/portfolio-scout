@@ -36,7 +36,12 @@ export class SafeOperationalError extends Error {
 }
 
 export function safeError(error: unknown): SafeOperationalError {
-  return error instanceof SafeOperationalError
-    ? error
-    : new SafeOperationalError("MARKET_DATA_INTERNAL_ERROR", "Market-data operation failed.")
+  if (error instanceof SafeOperationalError) return error
+
+  // Keep browser responses generic, but emit a tightly redacted server-side
+  // diagnostic so production contract failures can be identified from the
+  // Supabase Edge Function Logs without exposing credentials or bearer tokens.
+  console.error(`[refresh-market-data] ${redactSensitiveText(error)}`)
+
+  return new SafeOperationalError("MARKET_DATA_INTERNAL_ERROR", "Market-data operation failed.")
 }
