@@ -6,7 +6,6 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/state";
 import { useSupabase } from "@/providers/auth";
-import { usePortfolios } from "@/providers/portfolio";
 
 export const Route = createFileRoute("/_app/market-data-test")({
   ssr: false,
@@ -38,16 +37,10 @@ interface MappingResult {
 
 function MarketDataTestPage() {
   const supabase = useSupabase();
-  const { activePortfolio } = usePortfolios();
   const [result, setResult] = useState<MappingResult | null>(null);
 
   const mappingTest = useMutation({
     mutationFn: async () => {
-      if (!activePortfolio) throw new Error("No active portfolio selected.");
-      if (activePortfolio.id !== EXPECTED_PORTFOLIO_ID) {
-        throw new Error("The active portfolio does not match the approved test portfolio.");
-      }
-
       const { data, error } = await supabase.functions.invoke("refresh-market-data", {
         body: {
           action: "SYNC_MAPPINGS",
@@ -83,8 +76,6 @@ function MarketDataTestPage() {
     },
   });
 
-  const portfolioMatches = activePortfolio?.id === EXPECTED_PORTFOLIO_ID;
-
   return (
     <>
       <PageHeader
@@ -100,21 +91,13 @@ function MarketDataTestPage() {
             <p className="font-mono text-xs text-muted-foreground">Portfolio: {EXPECTED_PORTFOLIO_ID}</p>
           </div>
 
-          {!activePortfolio ? (
-            <p className="mt-4 text-sm text-amber-600">Select the PortfolioAI portfolio first.</p>
-          ) : !portfolioMatches ? (
-            <p className="mt-4 text-sm text-amber-600">
-              Active portfolio mismatch. Switch to the approved PortfolioAI portfolio before testing.
-            </p>
-          ) : (
-            <p className="mt-4 text-sm text-muted-foreground">
-              The request uses your existing authenticated Supabase session. Angel One credentials remain only in Supabase Edge Function Secrets.
-            </p>
-          )}
+          <p className="mt-4 text-sm text-muted-foreground">
+            This test always targets the approved portfolio above, regardless of the portfolio selected in the UI. The Edge Function independently verifies that the portfolio belongs to your authenticated user and that every sampled security is a current holding. Angel One credentials remain only in Supabase Edge Function Secrets.
+          </p>
 
           <Button
             className="mt-4"
-            disabled={!portfolioMatches || mappingTest.isPending}
+            disabled={mappingTest.isPending}
             onClick={() => {
               setResult(null);
               mappingTest.mutate();
