@@ -28,7 +28,9 @@ const corsHeaders = {
 
 const LEASE_SECONDS = 300
 const PRICE_REFRESH_COOLDOWN_SECONDS = 60
+const PRICE_REFRESH_FAILURE_COOLDOWN_SECONDS = 5
 const MAPPING_SYNC_COOLDOWN_SECONDS = 3600
+const MAPPING_SYNC_FAILURE_COOLDOWN_SECONDS = 5
 
 interface AdminClient {
   rpc(
@@ -217,6 +219,7 @@ Deno.serve(async (request) => {
       if (portfolioError || !portfolio) return json(404, { error: "Portfolio not found." })
 
       const leaseHolder = crypto.randomUUID()
+      let mappingSyncCompleted = false
       await acquireLease(admin, portfolio.id, "SYNC_MAPPINGS", leaseHolder)
       try {
         const { data: holdings, error: holdingsError } = await admin
@@ -368,6 +371,7 @@ Deno.serve(async (request) => {
         })
         if (auditError) throw auditError
 
+        mappingSyncCompleted = true
         return json(200, {
           mapped: mappedCount,
           ambiguous: accepted.filter((mapping) => mapping.mappingStatus === "AMBIGUOUS").length,
@@ -381,7 +385,7 @@ Deno.serve(async (request) => {
           portfolio.id,
           "SYNC_MAPPINGS",
           leaseHolder,
-          MAPPING_SYNC_COOLDOWN_SECONDS,
+          mappingSyncCompleted ? MAPPING_SYNC_COOLDOWN_SECONDS : MAPPING_SYNC_FAILURE_COOLDOWN_SECONDS,
         )
       }
     }
@@ -403,6 +407,7 @@ Deno.serve(async (request) => {
     if (portfolioError || !portfolio) return json(404, { error: "Portfolio not found." })
 
     const leaseHolder = crypto.randomUUID()
+    let priceRefreshCompleted = false
     await acquireLease(admin, portfolio.id, "REFRESH_PRICES", leaseHolder)
     try {
       const { data: holdings, error: holdingsError } = await admin
@@ -485,6 +490,7 @@ Deno.serve(async (request) => {
       if (runError) throw runError
 
       if (!toFetch.length) {
+        priceRefreshCompleted = true
         return json(200, {
           runId: run.id,
           fetched: 0,
@@ -532,6 +538,7 @@ Deno.serve(async (request) => {
           .eq("id", run.id)
         if (finishError) throw finishError
 
+        priceRefreshCompleted = true
         return json(200, {
           runId: run.id,
           fetched: observations.length,
@@ -557,7 +564,7 @@ Deno.serve(async (request) => {
         portfolio.id,
         "REFRESH_PRICES",
         leaseHolder,
-        PRICE_REFRESH_COOLDOWN_SECONDS,
+        priceRefreshCompleted ? PRICE_REFRESH_COOLDOWN_SECONDS : PRICE_REFRESH_FAILURE_COOLDOWN_SECONDS,
       )
     }
   } catch (error) {
