@@ -80,20 +80,20 @@ function MarketDataEodPilotPage() {
   const verification = useQuery({
     queryKey: ["eod-pilot-verification", dateRange.fromDate, dateRange.toDate],
     queryFn: async (): Promise<VerificationRow[]> => {
-      const { data, error } = await supabase
-        .from("market_price_history_eod")
-        .select("security_id,trade_date,open_price,high_price,low_price,close_price,volume")
-        .eq("provider_code", "ANGEL_ONE")
-        .in("security_id", PILOT_SECURITIES.map((item) => item.securityId))
-        .gte("trade_date", dateRange.fromDate)
-        .lte("trade_date", dateRange.toDate)
-        .order("trade_date", { ascending: true });
+      const results: VerificationRow[] = [];
 
-      if (error) throw new Error(error.message);
-      const rows = (data ?? []) as HistoryRow[];
+      for (const security of PILOT_SECURITIES) {
+        const { data, error } = await supabase
+          .from("market_price_history_eod")
+          .select("security_id,trade_date,open_price,high_price,low_price,close_price,volume")
+          .eq("provider_code", "ANGEL_ONE")
+          .eq("security_id", security.securityId)
+          .gte("trade_date", dateRange.fromDate)
+          .lte("trade_date", dateRange.toDate)
+          .order("trade_date", { ascending: true });
 
-      return PILOT_SECURITIES.map((security) => {
-        const securityRows = rows.filter((row) => row.security_id === security.securityId);
+        if (error) throw new Error(error.message);
+        const securityRows = (data ?? []) as HistoryRow[];
         let invalidOhlc = 0;
         let nullVolume = 0;
 
@@ -118,7 +118,7 @@ function MarketDataEodPilotPage() {
           if (row.volume === null || row.volume === undefined || row.volume === "") nullVolume += 1;
         }
 
-        return {
+        results.push({
           ticker: security.ticker,
           securityId: security.securityId,
           candles: securityRows.length,
@@ -126,8 +126,10 @@ function MarketDataEodPilotPage() {
           lastDate: securityRows.at(-1)?.trade_date ?? null,
           invalidOhlc,
           nullVolume,
-        };
-      });
+        });
+      }
+
+      return results;
     },
   });
 
