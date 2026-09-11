@@ -2,12 +2,6 @@ name: Deploy refresh-market-data
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "edge-functions/refresh-market-data/**"
-      - ".github/workflows/deploy-refresh-market-data.yml"
 
 permissions:
   contents: read
