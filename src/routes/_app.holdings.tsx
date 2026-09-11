@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -85,6 +85,7 @@ type SortMode = "TICKER" | "CURRENT_VALUE" | "UNREALIZED_PCT" | "REALIZED_PL";
 type PriceSource = "LIVE" | "CACHED" | "SHEET" | "UNAVAILABLE";
 
 const ANGEL_FRESH_MS = 5 * 60 * 1000;
+const ANGEL_AUTO_REFRESH_MS = 15 * 60 * 1000;
 
 function HoldingsPage() {
   const supabase = useSupabase();
@@ -92,6 +93,7 @@ function HoldingsPage() {
   const { activePortfolio } = usePortfolios();
   const queryClient = useQueryClient();
   const portfolioId = activePortfolio?.id ?? null;
+  const autoRefreshInFlight = useRef(false);
 
   const [search, setSearch] = useState("");
   const [positionFilter, setPositionFilter] = useState<PositionFilter>("ALL");
@@ -199,6 +201,41 @@ function HoldingsPage() {
     },
     onError: (error: Error) => toast.error(error.message),
   });
+
+  useEffect(() => {
+    if (!portfolioId) return;
+    let cancelled = false;
+
+    const refreshDuringMarketHours = async () => {
+      if (cancelled || document.visibilityState !== "visible" || !isNseMarketHours(new Date()) || autoRefreshInFlight.current) {
+        return;
+      }
+
+      autoRefreshInFlight.current = true;
+      try {
+        const { error } = await supabase.functions.invoke("refresh-market-data", {
+          body: { action: "REFRESH", portfolioId },
+        });
+        if (!error && !cancelled) {
+          await queryClient.invalidateQueries({ queryKey: ["holdings-pro", portfolioId] });
+          await queryClient.invalidateQueries({ queryKey: ["dashboard", portfolioId] });
+        }
+      } catch (error) {
+        console.warn("Automatic Angel One refresh failed; cached prices remain available.", error);
+      } finally {
+        autoRefreshInFlight.current = false;
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void refreshDuringMarketHours();
+    }, ANGEL_AUTO_REFRESH_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [portfolioId, queryClient, supabase]);
 
   const setRole = useMutation({
     mutationFn: async ({ securityId, role, existingId }: { securityId: string; role: PortfolioRole; existingId: string | null }) => {
@@ -403,7 +440,7 @@ function HoldingsPage() {
           <span className="text-muted-foreground">
             Last cache update: {summary.latestAngelRetrievedAt ? formatMarketTimestamp(summary.latestAngelRetrievedAt) : "not available"}
           </span>
-          <span className="text-muted-foreground">Refresh mode: manual</span>
+          <span className="text-muted-foreground">Refresh mode: manual + every 15 min during NSE hours while this page is open</span>
         </div>
       ) : null}
 
@@ -644,6 +681,23 @@ function trimNumber(value: string | number): string {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return String(value);
   return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 8 }).format(numeric);
+}
+
+function isNseMarketHours(value: Date): boolean {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Kolkata",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(value);
+  const weekday = parts.find((part) => part.type === "weekday")?.value ?? "";
+  if (weekday === "Sat" || weekday === "Sun") return false;
+  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? Number.NaN);
+  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? Number.NaN);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
+  const minutes = hour * 60 + minute;
+  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
 function formatMarketTimestamp(value: string): string {
