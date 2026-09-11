@@ -41,6 +41,21 @@ interface BatchResult extends BackfillResult {
   error?: string;
 }
 
+interface CoverageRow {
+  security_id: string;
+  provider_code: string;
+  candle_count: number | string;
+  first_trade_date: string | null;
+  last_trade_date: string | null;
+  missing_volume_count: number | string;
+  invalid_ohlc_count: number | string;
+  latest_retrieved_at: string | null;
+}
+
+interface CoverageItem extends CoverageRow {
+  ticker: string;
+}
+
 function MarketDataEodPage() {
   const supabase = useSupabase();
   const { activePortfolio } = usePortfolios();
@@ -107,6 +122,45 @@ function MarketDataEodPage() {
     },
   });
 
+  const eligible = eligibility.data?.eligible ?? [];
+
+  const coverage = useQuery({
+    queryKey: ["eod-portfolio-coverage", portfolioId, eligible.map((item) => item.securityId).join("|")],
+    enabled: Boolean(portfolioId) && eligible.length > 0,
+    queryFn: async (): Promise<CoverageItem[]> => {
+      const tickerById = new Map(eligible.map((item) => [item.securityId, item.ticker]));
+      const rows: CoverageRow[] = [];
+
+      for (const idChunk of chunks(eligible.map((item) => item.securityId), 200)) {
+        const { data, error } = await supabase
+          .from("market_eod_security_coverage")
+          .select("security_id,provider_code,candle_count,first_trade_date,last_trade_date,missing_volume_count,invalid_ohlc_count,latest_retrieved_at")
+          .eq("provider_code", "ANGEL_ONE")
+          .in("security_id", idChunk);
+        if (error) throw new Error(error.message);
+        rows.push(...((data ?? []) as CoverageRow[]));
+      }
+
+      const byId = new Map(rows.map((row) => [row.security_id, row]));
+      return eligible.map((item) => {
+        const row = byId.get(item.securityId);
+        return row
+          ? { ...row, ticker: tickerById.get(item.securityId) ?? item.ticker }
+          : {
+              security_id: item.securityId,
+              provider_code: "ANGEL_ONE",
+              candle_count: 0,
+              first_trade_date: null,
+              last_trade_date: null,
+              missing_volume_count: 0,
+              invalid_ohlc_count: 0,
+              latest_retrieved_at: null,
+              ticker: item.ticker,
+            };
+      });
+    },
+  });
+
   const completed = useMemo(() => {
     if (!progressKey || typeof window === "undefined") return new Set<string>();
     try {
@@ -117,7 +171,6 @@ function MarketDataEodPage() {
     }
   }, [progressKey, results]);
 
-  const eligible = eligibility.data?.eligible ?? [];
   const remaining = eligible.filter((item) => !completed.has(item.securityId));
   const batches = chunks(remaining, BATCH_SIZE);
 
@@ -180,6 +233,7 @@ function MarketDataEodPage() {
       }
     } finally {
       setRunning(false);
+      void coverage.refetch();
     }
   }
 
@@ -195,11 +249,35 @@ function MarketDataEodPage() {
   const candles = results.reduce((sum, row) => sum + (row.candlesUpserted ?? 0), 0);
   const failed = results.reduce((sum, row) => sum + (row.ok ? 0 : 1), 0);
 
+  const coverageSummary = useMemo(() => {
+    const rows = coverage.data ?? [];
+    const withData = rows.filter((row) => Number(row.candle_count) > 0);
+    const noData = rows.filter((row) => Number(row.candle_count) === 0);
+    const invalid = rows.reduce((sum, row) => sum + Number(row.invalid_ohlc_count || 0), 0);
+    const missingVolume = rows.reduce((sum, row) => sum + Number(row.missing_volume_count || 0), 0);
+    const totalCandles = rows.reduce((sum, row) => sum + Number(row.candle_count || 0), 0);
+    const latestDates = withData.map((row) => row.last_trade_date).filter((value): value is string => Boolean(value));
+    const latestPortfolioDate = latestDates.length ? latestDates.sort().at(-1)! : null;
+    const lagging = latestPortfolioDate
+      ? rows.filter((row) => row.last_trade_date !== latestPortfolioDate)
+      : rows;
+
+    return {
+      withData: withData.length,
+      noData: noData.length,
+      invalid,
+      missingVolume,
+      totalCandles,
+      latestPortfolioDate,
+      lagging,
+    };
+  }, [coverage.data]);
+
   return (
     <>
       <PageHeader
         title="Full Portfolio EOD History"
-        description="Production-safe resumable one-year Angel One EOD backfill. It respects the currently deployed 5-security server guard and 60-second operation cooldown; no transaction or holding data is modified."
+        description="Production-safe resumable one-year Angel One EOD history with portfolio-wide coverage verification. No transaction or holding data is modified."
       />
 
       <section className="rounded-lg border border-border bg-card p-5">
@@ -238,7 +316,7 @@ function MarketDataEodPage() {
         </div>
 
         <p className="mt-3 text-xs text-muted-foreground">
-          Keep this page open while it runs. Completion is saved in this browser after every successful batch, so a later session resumes from the remaining securities. Because the current backend intentionally allows only five securities per request and a 60-second cooldown, a first full 250-stock pass can take roughly 50 minutes. This is deliberately conservative until we separately review and deploy a larger server-side batch limit.
+          Keep this page open while it runs. Completion is saved in this browser after every successful batch, so a later session resumes from the remaining securities. The current backend intentionally allows only five securities per request and a 60-second cooldown.
         </p>
       </section>
 
@@ -277,6 +355,73 @@ function MarketDataEodPage() {
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section className="mt-4 rounded-lg border border-border bg-card p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">Stage 2C · Portfolio-wide EOD health</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Aggregated read-only coverage from market_price_history_eod. The latest portfolio trade date is used as the comparison point so newer IPOs are not penalized simply for having shorter histories.
+            </p>
+          </div>
+          <Button variant="outline" size="sm" disabled={coverage.isFetching || !eligible.length} onClick={() => void coverage.refetch()}>
+            {coverage.isFetching ? "Verifying…" : "Verify portfolio history"}
+          </Button>
+        </div>
+
+        {coverage.error ? (
+          <div className="mt-4 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+            {coverage.error.message}
+          </div>
+        ) : (
+          <>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+              <Metric label="With EOD data" value={`${coverageSummary.withData}/${eligible.length || 0}`} />
+              <Metric label="No EOD data" value={String(coverageSummary.noData)} />
+              <Metric label="Stored candles" value={String(coverageSummary.totalCandles)} />
+              <Metric label="Invalid OHLC" value={String(coverageSummary.invalid)} />
+              <Metric label="Missing volume" value={String(coverageSummary.missingVolume)} />
+              <Metric label="Latest trade date" value={coverageSummary.latestPortfolioDate ?? "—"} />
+            </div>
+
+            <div className="mt-5 overflow-x-auto">
+              <table className="w-full min-w-[880px] text-left text-sm">
+                <thead className="border-b border-border text-xs text-muted-foreground">
+                  <tr>
+                    <th className="pb-2 pr-4 font-medium">Ticker</th>
+                    <th className="pb-2 pr-4 font-medium">Candles</th>
+                    <th className="pb-2 pr-4 font-medium">First date</th>
+                    <th className="pb-2 pr-4 font-medium">Last date</th>
+                    <th className="pb-2 pr-4 font-medium">Status</th>
+                    <th className="pb-2 pr-4 font-medium">Invalid OHLC</th>
+                    <th className="pb-2 font-medium">Missing volume</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(coverage.data ?? []).map((row) => {
+                    const hasData = Number(row.candle_count) > 0;
+                    const current = Boolean(coverageSummary.latestPortfolioDate) && row.last_trade_date === coverageSummary.latestPortfolioDate;
+                    const clean = Number(row.invalid_ohlc_count) === 0;
+                    const status = !hasData ? "NO DATA" : current && clean ? "CURRENT" : current ? "CHECK" : "LAGGING";
+                    const tone = status === "CURRENT" ? "success" : status === "NO DATA" ? "danger" : "warning";
+                    return (
+                      <tr key={row.security_id} className="border-b border-border/60 last:border-b-0">
+                        <td className="py-2.5 pr-4 font-mono text-xs text-foreground">{row.ticker}</td>
+                        <td className="py-2.5 pr-4 font-mono">{Number(row.candle_count)}</td>
+                        <td className="py-2.5 pr-4 font-mono text-xs">{row.first_trade_date ?? "—"}</td>
+                        <td className="py-2.5 pr-4 font-mono text-xs">{row.last_trade_date ?? "—"}</td>
+                        <td className="py-2.5 pr-4"><StatusBadge tone={tone}>{status}</StatusBadge></td>
+                        <td className="py-2.5 pr-4 font-mono">{Number(row.invalid_ohlc_count)}</td>
+                        <td className="py-2.5 font-mono">{Number(row.missing_volume_count)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </section>
     </>
   );
