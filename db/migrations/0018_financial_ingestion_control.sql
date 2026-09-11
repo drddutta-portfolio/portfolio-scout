@@ -1,12 +1,14 @@
 -- 0018_financial_ingestion_control.sql
 -- PortfolioAI Stage 3B — provider ingestion control and rejection audit.
 --
--- PREPARED FOR REVIEW. DO NOT APPLY UNTIL REVIEWED.
+-- REVIEWED FOR MANUAL APPLICATION. DO NOT AUTO-DEPLOY.
 --
 -- Invariants
 --   * additive control/audit layer only; no mutation of transactions, holdings,
 --     market data, or Stage 3A financial evidence.
 --   * browser is read-only for ingestion history; writes are server/service-role.
+--   * portfolio-scoped runs must preserve owner/portfolio integrity.
+--   * audit rows cannot be deleted by the service role through ordinary grants.
 --   * no provider credentials, tokens, cookies, passwords, API keys or raw secrets.
 --   * rejection details must be diagnostic only and must not contain secrets.
 
@@ -46,9 +48,9 @@ create table public.financial_data_ingestion_runs (
   constraint fdir_provider_contract_ck check (provider_contract is null or char_length(provider_contract) <= 200),
   constraint fdir_error_code_ck check (error_code is null or char_length(error_code) <= 100),
   constraint fdir_error_summary_ck check (error_summary is null or char_length(error_summary) <= 1000),
-  constraint fdir_owner_portfolio_shape_ck check (
-    portfolio_id is null or owner_id is not null
-  )
+  constraint fdir_owner_portfolio_shape_ck check (portfolio_id is null or owner_id is not null),
+  constraint fdir_owner_portfolio_fk foreign key (owner_id, portfolio_id)
+    references public.portfolios(owner_id, id) on delete restrict
 );
 
 create index fdir_provider_started_idx
@@ -88,7 +90,8 @@ create table public.financial_data_ingestion_rejections (
   )),
   constraint fdirj_summary_ck check (char_length(rejection_summary) between 1 and 1000),
   constraint fdirj_source_key_ck check (source_record_key is null or char_length(source_record_key) <= 300),
-  constraint fdirj_source_parameter_ck check (source_parameter is null or char_length(source_parameter) <= 200)
+  constraint fdirj_source_parameter_ck check (source_parameter is null or char_length(source_parameter) <= 200),
+  constraint fdirj_safe_context_ck check (jsonb_typeof(safe_context) = 'object')
 );
 
 create index fdirj_run_idx
@@ -99,23 +102,35 @@ create index fdirj_provider_code_idx
 comment on table public.financial_data_ingestion_rejections is
   'Safe structured diagnostics for provider records rejected during normalization. Must never contain secrets.';
 
--- Privileges: browser read-only; service role owns ingestion writes.
+-- Privileges: browser read-only; service-role writes are deliberately bounded.
 revoke all on public.financial_data_ingestion_runs from public, anon, authenticated;
 revoke all on public.financial_data_ingestion_rejections from public, anon, authenticated;
 
 grant select on public.financial_data_ingestion_runs to authenticated;
 grant select on public.financial_data_ingestion_rejections to authenticated;
-grant all on public.financial_data_ingestion_runs to service_role;
-grant all on public.financial_data_ingestion_rejections to service_role;
+
+grant select, insert, update on public.financial_data_ingestion_runs to service_role;
+grant select, insert on public.financial_data_ingestion_rejections to service_role;
 
 alter table public.financial_data_ingestion_runs enable row level security;
 alter table public.financial_data_ingestion_rejections enable row level security;
 
--- Personal-use V1: authenticated users may inspect shared ingestion audit/evidence.
--- If multi-user isolation is introduced later, narrow these policies using owner/security access rules.
+-- Owner-scoped runs are visible only to that owner. Ownerless runs are shared
+-- operational records (for example provider discovery) and remain readable.
 create policy fdir_authenticated_read on public.financial_data_ingestion_runs
-  for select to authenticated using (true);
+  for select to authenticated
+  using (owner_id is null or owner_id = auth.uid());
+
+-- Rejections inherit visibility from their parent ingestion run.
 create policy fdirj_authenticated_read on public.financial_data_ingestion_rejections
-  for select to authenticated using (true);
+  for select to authenticated
+  using (
+    exists (
+      select 1
+      from public.financial_data_ingestion_runs r
+      where r.id = ingestion_run_id
+        and (r.owner_id is null or r.owner_id = auth.uid())
+    )
+  );
 
 commit;
