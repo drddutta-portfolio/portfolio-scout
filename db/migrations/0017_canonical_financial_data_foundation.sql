@@ -267,7 +267,7 @@ create table public.analyst_consensus_observations (
   constraint aco_confidence_ck check (confidence is null or (confidence >= 0 and confidence <= 1)),
   constraint aco_observation_version_ck check (observation_version >= 1),
   constraint aco_source_key_ck check (char_length(source_record_key) between 1 and 300),
-  constraint aco_unique_source_version unique (provider_code, source_record_key, observation_version)
+  constraint aco_unique_source_version unique (security_id, provider_code, source_record_key, observation_version)
 );
 
 create index aco_security_observed_idx
@@ -360,7 +360,7 @@ create table public.analyst_revision_observations (
   constraint aro_observation_version_ck check (observation_version >= 1),
   constraint aro_source_key_ck check (char_length(source_record_key) between 1 and 300),
   constraint aro_unique_source_version unique (
-    provider_code, source_record_key, revision_subject, observation_version
+    security_id, provider_code, source_record_key, revision_subject, observation_version
   )
 );
 
