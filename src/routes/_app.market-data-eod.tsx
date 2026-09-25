@@ -428,7 +428,7 @@ function MarketDataEodPage() {
                     const current = Boolean(coverageSummary.latestPortfolioDate) && row.last_trade_date === coverageSummary.latestPortfolioDate;
                     const clean = Number(row.invalid_ohlc_count) === 0;
                     const status = !hasData ? "NO DATA" : current && clean ? "CURRENT" : current ? "CHECK" : "LAGGING";
-                    const tone = status === "CURRENT" ? "success" : status === "NO DATA" ? "danger" : "warning";
+                    const tone = status === "CURRENT" ? "ok" : status === "NO DATA" ? "bad" : "warn";
                     return (
                       <tr key={row.security_id} className="border-b border-border/60 last:border-b-0">
                         <td className="py-2.5 pr-4 font-mono text-xs text-foreground">{row.ticker}</td>
@@ -469,7 +469,7 @@ function BatchTable({ rows, emptyText }: { rows: BatchResult[]; emptyText: strin
           {rows.length ? rows.map((row) => (
             <tr key={`${row.batch}-${row.runId ?? row.error}`} className="border-b border-border/60 last:border-b-0">
               <td className="py-2.5 pr-4 font-mono">{row.batch}</td>
-              <td className="py-2.5 pr-4"><StatusBadge tone={row.ok ? "success" : "danger"}>{row.ok ? "COMPLETE" : "STOPPED"}</StatusBadge></td>
+              <td className="py-2.5 pr-4"><StatusBadge tone={row.ok ? "ok" : "bad"}>{row.ok ? "COMPLETE" : "STOPPED"}</StatusBadge></td>
               <td className="max-w-[420px] py-2.5 pr-4 text-xs text-muted-foreground">{row.tickers.join(", ")}</td>
               <td className="py-2.5 pr-4 font-mono">{row.fetchedSecurities ?? 0}</td>
               <td className="py-2.5 pr-4 font-mono">{row.candlesUpserted ?? 0}</td>

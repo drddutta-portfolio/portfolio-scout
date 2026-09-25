@@ -356,7 +356,7 @@ function MarketDataEodBackfillPage() {
                   <tr key={`${row.batchNumber}-${row.runId ?? row.error}`} className="border-b border-border/60 last:border-b-0">
                     <td className="py-2.5 pr-4 font-mono">{row.batchNumber}</td>
                     <td className="py-2.5 pr-4">
-                      <StatusBadge tone={row.ok ? "success" : "danger"}>{row.ok ? "COMPLETE" : "STOPPED"}</StatusBadge>
+                      <StatusBadge tone={row.ok ? "ok" : "bad"}>{row.ok ? "COMPLETE" : "STOPPED"}</StatusBadge>
                     </td>
                     <td className="max-w-[360px] py-2.5 pr-4 text-xs text-muted-foreground">{row.tickers.join(", ")}</td>
                     <td className="py-2.5 pr-4 font-mono">{row.fetchedSecurities ?? 0}</td>
