@@ -59,7 +59,7 @@ pg_dump "$PORTFOLIOAI_DATABASE_URL" \
 printf '%s\n' '-- No project-created roles are allowlisted for this backup format.' > "$workdir/globals.sql"
 
 extension_json="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c "select coalesce(jsonb_agg(jsonb_build_object('name', extname, 'version', extversion) order by extname), '[]'::jsonb) from pg_catalog.pg_extension")"
-table_json="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c "select coalesce(jsonb_agg(format('%I.%I', schemaname, tablename) order by schemaname, tablename), '[]'::jsonb) from pg_catalog.pg_tables where schemaname = 'public')"
+table_json="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c "select coalesce(jsonb_agg(format('%I.%I', schemaname, tablename) order by schemaname, tablename), '[]'::jsonb) from pg_catalog.pg_tables where schemaname = 'public'")"
 auth_json='{}'
 for table in "${auth_table_names[@]}"; do
   columns="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq --set="table_name=$table" -c "select coalesce(jsonb_agg(column_name order by ordinal_position), '[]'::jsonb) from information_schema.columns where table_schema='auth' and table_name=:'table_name'")"
