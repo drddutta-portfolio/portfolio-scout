@@ -1,45 +1,99 @@
-# Deploy refresh-market-data Edge Function
+# Manual full-database backup and guarded recovery
 
-Deploy the existing `edge-functions/refresh-market-data/` source to the dedicated external Supabase project as the function `refresh-market-data`. No redesign, no rewrites, no new migrations, no database or UI changes.
+## Goal
 
-## Prerequisite (user action required)
+Add GitHub Actions workflows that create a restorable PostgreSQL backup of PortfolioAI’s dedicated Supabase database—including application data and Auth records—and retain it in a private Supabase Storage bucket. Add a separately triggered, strongly guarded recovery workflow capable of rebuilding the database from a selected backup.
 
-Deploying to an external Supabase project requires a **Supabase Management API personal access token** (`sbp_...`). The sandbox currently has only `PORTFOLIOAI_SUPABASE_URL`, the publishable key, and the DB password — none of these can deploy Edge Functions.
+This changes GitHub automation and documentation only. It does not run a backup, restore data, modify migrations, change the app, or alter the live database during implementation.
 
-- Create a token at https://supabase.com/dashboard/account/tokens (read + write access to the PortfolioAI project).
-- Provide it in chat or store it as a secret; it will be used only as the `SUPABASE_ACCESS_TOKEN` env var for the deploy command, never committed or printed.
+## Important recovery boundary
 
-If the token cannot be provided, the alternative is manual deployment by the user with `supabase functions deploy refresh-market-data` from their machine — in that case this plan stops.
+The backup will reproduce all database objects and rows the Supabase database owner can export: application schemas and data, Auth schema/data, functions, views, triggers, RLS policies, grants, sequences, extensions metadata, and accessible roles. It cannot reproduce Supabase platform configuration outside PostgreSQL, such as project settings, Edge Function source/secrets, OAuth provider settings, custom domains, or Storage object file contents. Those require separate exports/configuration.
 
-## Steps
+Keeping the only backup inside the same Supabase project is not disaster-independent: if that project or its Storage becomes unavailable, the backup may also be unavailable. This implementation will follow the requested private Supabase bucket destination, while documenting that a later second copy outside the project is recommended.
 
-1. **Pre-flight verification (read-only)**
-   - Confirm M13 objects exist via `psql` using the existing DB password (read-only queries only: check `market_price_latest`-related tables from `db/migrations/0013_market_data_foundation.sql`).
-   - Confirm the seven `ANGEL_ONE_*` secrets exist on the project via Management API `GET /v1/projects/{ref}/secrets` (names only; values are never returned or printed).
-   - Bundle-check the function locally with Deno (`deno check`/`deno bundle` on `index.ts` in a temp copy) to catch compile errors before deploy.
+## Files to add
 
-2. **Stage a deploy directory (no repo changes)**
-   - Copy `edge-functions/refresh-market-data/` to a temp `supabase/functions/refresh-market-data/` staging layout under `/tmp` (the Supabase CLI requires this layout; the repository itself is not modified).
-   - Create a minimal temp `config.toml` for the project ref with `verify_jwt = true` explicitly set for this function (default is already true; this makes the security posture explicit). No other config.
-   - Project ref is derived at deploy time from `PORTFOLIOAI_SUPABASE_URL`.
+### `.github/workflows/backup-supabase-database.yml`
 
-3. **Deploy**
-   - Install the Supabase CLI via nix in the sandbox.
-   - Run `supabase functions deploy refresh-market-data --project-ref <ref>` with `SUPABASE_ACCESS_TOKEN` set, from the temp staging directory.
-   - Do NOT use `--no-verify-jwt`. Do NOT pass any Angel One or database secrets on the command line.
+Manual `workflow_dispatch` only:
 
-4. **Post-deploy verification (read-only)**
-   - `GET /v1/projects/{ref}/functions` via Management API: confirm `refresh-market-data` is listed with status ACTIVE and `verify_jwt: true`.
-   - Confirm no invocation is performed: **no** SYNC_MAPPINGS, REFRESH, or full-portfolio refresh is run. Controlled 3–5 security pilot is a separate, later step.
+1. Validate required GitHub Actions secrets without printing values.
+2. Install a pinned PostgreSQL 17 client to match the deployed PostgreSQL major version.
+3. Create two dumps:
+   - `database.dump`: custom-format `pg_dump` of every accessible non-system schema, including schema definitions and all row data (including `auth`).
+   - `roles.sql`: `pg_dumpall --roles-only`, filtered only where needed for Supabase-managed restrictions while retaining restorable role/grant definitions.
+4. Generate a plaintext manifest with UTC timestamp, project reference, PostgreSQL version, dump format/version, SHA-256 checksums, and file sizes—never credentials.
+5. Package the dump, role file, manifest, and a generated restore README into one timestamped archive.
+6. Upload it to a configured private Supabase Storage bucket/path using Supabase Storage’s S3-compatible endpoint and dedicated Storage access credentials.
+7. Verify the remote object exists and its uploaded size matches; do not expose a public URL.
+8. Always delete local dump files from the runner.
+9. Use least-privilege GitHub permissions (`contents: read`), no schedule, no commits, concurrency protection, timeout, and shell fail-fast behavior.
 
-5. **Report and stop**
-   - Report only: deployment success/failure and any build/deploy errors.
-   - Confirm: no migrations executed, M01–M13 untouched, no transaction/holdings/import changes, no UI changes, no secrets exposed.
-   - Note any repo-hygiene follow-ups only if something unexpected was required (expected: none — temp staging lives outside the repo).
+Suggested object key:
 
-## Technical details
+```text
+database-backups/portfolioai/portfolioai-db-YYYYMMDDTHHMMSSZ.tar.gz
+```
 
-- Tooling: Supabase CLI (nix), Deno for local bundle check, `psql` for read-only M13 verification, Management API over HTTPS for function/secret listing.
-- Secrets handling: the access token is an env var for the single deploy command; it is never echoed, logged, written to files, or committed. Token output from CLI is not printed beyond status lines.
-- Rollback: if deploy fails, nothing changes on the project (functions deploy is all-or-nothing per version); the previously deployed version, if any, remains active.
-- Out of scope: Angel One pilot invocation, market-data refresh, any database writes, any repo source edits.
+### `.github/workflows/restore-supabase-database.yml`
+
+Separate manual-only recovery workflow:
+
+1. Require explicit inputs:
+   - exact private Storage object key;
+   - target project reference;
+   - typed confirmation phrase `RESTORE PORTFOLIOAI DATABASE`;
+   - acknowledgement that current target data will be replaced.
+2. Require a protected GitHub Environment named `database-recovery`, allowing repository owners to configure required reviewers before this workflow can run.
+3. Download the selected private archive with Storage S3 credentials.
+4. Verify archive path safety and SHA-256 checksums before any database connection.
+5. Verify the backup’s PostgreSQL major version and target project reference; stop on mismatch unless a separate explicit cross-project recovery input is supplied.
+6. Run a preflight inventory and connection check before destructive operations.
+7. Restore roles first where permitted, then restore the custom-format database dump with deterministic `pg_restore` options, transaction/error-stop safeguards, and no secrets in logs.
+8. Run read-only post-restore checks for expected PortfolioAI schemas/tables, Auth rows, migration objects, functions, RLS-enabled tables, and key row counts recorded in the manifest.
+9. Delete downloaded backup material from the runner even on failure.
+
+The recovery workflow will not be run while building this feature.
+
+## Supporting documentation
+
+Add `docs/database-backup-and-recovery.md` covering:
+
+- What is and is not included.
+- One-time setup for a **private** bucket and GitHub Environment protection.
+- Required GitHub repository secrets, stored only in GitHub Actions:
+  - `PORTFOLIOAI_DATABASE_URL`: direct PostgreSQL connection string for database owner-level dump/restore access.
+  - `PORTFOLIOAI_SUPABASE_PROJECT_REF`: target project reference (may instead be a non-secret repository variable).
+  - `PORTFOLIOAI_STORAGE_S3_ACCESS_KEY_ID` and `PORTFOLIOAI_STORAGE_S3_SECRET_ACCESS_KEY`: dedicated S3-compatible Storage credentials used only for the private backup bucket.
+  - `PORTFOLIOAI_BACKUP_BUCKET`: private bucket name (prefer a non-secret repository variable).
+- The Storage credentials are preferred over introducing a service-role key; no service-role credential enters the application or repository.
+- How to trigger a backup, inspect its manifest, apply retention manually, test a restore into a disposable Supabase project, and invoke production recovery only after approval.
+- A warning that a backup is not proven until a test restore succeeds.
+- Separate export requirements for Storage objects and Supabase platform/Edge Function configuration.
+
+## Security controls
+
+- No credentials in YAML, source, artifacts, command output, manifests, or documentation examples.
+- GitHub secrets are masked and passed only to the exact steps that need them.
+- Connection strings are never placed in command arguments where avoidable; use `PG*` environment variables derived without echoing.
+- Backup bucket must already exist and be private; workflows fail rather than create or make a bucket public.
+- Backup workflow has no restore/delete capability against the database.
+- Restore workflow uses a protected environment, exact confirmation phrase, target-project check, checksum verification, and manual dispatch only.
+- Archives are not published as GitHub artifacts and receive no public/signed URL.
+
+## Validation before delivery
+
+- Parse both YAML files and validate GitHub Actions structure.
+- Run ShellCheck against extracted shell blocks where practical.
+- Confirm workflow permissions are read-only and both triggers are manual only.
+- Confirm no secret-shaped values are present and existing application/migration files are untouched.
+- Confirm no workflow was dispatched, no live database/storage operation occurred, and no bucket or migration was created.
+- Document that the first real backup and a test restore into a disposable project are still required to establish recoverability.
+
+## Deliberately not included
+
+- Scheduled backups or automatic retention deletion.
+- Live execution during implementation.
+- Application, database migration, RLS, Auth, Edge Function, or UI changes.
+- Storage object-content backup, Edge Function secrets, or provider configuration export.
