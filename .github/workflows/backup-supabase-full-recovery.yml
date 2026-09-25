@@ -57,6 +57,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             postgresql-client-17 age jq unzip
 
+          # Ubuntu runners can have an older PostgreSQL client earlier in PATH.
+          # Force every later step in this job to use the PostgreSQL 17 binaries.
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/pg_dump --version
+          /usr/lib/postgresql/17/bin/psql --version
+
           curl -fsSL --retry 3 \
             "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
             -o /tmp/awscliv2.zip
