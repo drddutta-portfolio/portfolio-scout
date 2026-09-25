@@ -9,7 +9,7 @@ The repository provides a manual encrypted database backup workflow and a guarde
 The encrypted archive contains:
 
 - the complete `public` application schema and its row data;
-- Auth data from accessible base tables except managed migration/configuration tables (`schema_migrations`, `instances`, and ephemeral `flow_state` are excluded); the exact included table/column inventory is recorded in each manifest;
+- Auth data from accessible base tables except managed migration state and ephemeral flow state (`schema_migrations` and `flow_state` are excluded); the exact included table/column inventory is recorded in each manifest;
 - application functions, views, triggers, constraints, RLS policies, grants, and sequences from `public`;
 - a manifest of PostgreSQL/client versions, installed extensions, public tables, Auth table columns/counts, checksums, and the private Storage object key;
 - an explicit empty project-role allowlist. PortfolioAI currently uses Supabase’s existing platform roles, so they are never recreated.
@@ -112,7 +112,7 @@ export PORTFOLIOAI_AGE_RECIPIENT='age1...'
   --confirm 'RESTORE PORTFOLIOAI DATABASE'
 ```
 
-The script verifies checksums, PostgreSQL version, extension presence, Auth table compatibility, project references, and safe archive paths before writes. It then creates an encrypted safety backup of the target in the current directory (or `PORTFOLIOAI_SAFETY_BACKUP_DIR`) before replacement begins. It restores compatible Auth data first without `CASCADE`, then restores `public` so RESTRICT references to `auth.users` remain valid. Ownership is mapped to the target’s existing `postgres` role. It does not recreate `anon`, `authenticated`, `service_role`, any `pg_*` role, or Supabase administrative roles.
+The script verifies checksums, PostgreSQL version, extension presence, Auth table compatibility, project references, and safe archive paths before writes. It then creates an encrypted safety backup of the target in the current directory (or `PORTFOLIOAI_SAFETY_BACKUP_DIR`) before replacement begins. It recreates empty `public` objects, restores compatible Auth data without `CASCADE`, then restores application data and constraints so RESTRICT references to `auth.users` remain valid. Ownership is mapped to the target’s existing `postgres` role. It does not recreate `anon`, `authenticated`, `service_role`, any `pg_*` role, or Supabase administrative roles.
 
 ## Certification checklist
 

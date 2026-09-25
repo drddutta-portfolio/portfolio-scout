@@ -157,6 +157,13 @@ age --encrypt --recipient "$PORTFOLIOAI_AGE_RECIPIENT" \
   "$workdir/target-before-restore.tar"
 echo "Encrypted target safety backup: $safety_directory/portfolioai-target-before-restore-${safety_timestamp}.tar.age"
 
+# Recreate empty application objects first. Data and post-data constraints follow Auth restoration.
+pg_restore \
+  --dbname "$PORTFOLIOAI_RESTORE_DATABASE_URL" \
+  --use-list "$workdir/database.filtered.toc" --section=pre-data \
+  --clean --if-exists --exit-on-error --single-transaction \
+  --no-owner "$workdir/database.dump"
+
 # Auth data is restored only to the allowlisted, schema-compatible tables captured by the backup.
 # Existing target rows are cleared only in the disposable/certified target after all preflights pass.
 mapfile -t auth_tables < <(jq -r '.auth_tables | keys[]' "$manifest")
@@ -182,12 +189,15 @@ if ((${#auth_tables[@]})); then
     --file="$workdir/auth-restore.sql"
 fi
 
-# Restore application objects after Auth so RESTRICT references to auth.users remain intact.
-# --clean applies only to objects listed in the public-schema dump.
+# Restore application data, then constraints/policies, after Auth so RESTRICT references remain intact.
 pg_restore \
   --dbname "$PORTFOLIOAI_RESTORE_DATABASE_URL" \
-  --use-list "$workdir/database.filtered.toc" \
-  --clean --if-exists --exit-on-error --single-transaction \
+  --use-list "$workdir/database.filtered.toc" --section=data \
+  --exit-on-error --single-transaction --no-owner "$workdir/database.dump"
+pg_restore \
+  --dbname "$PORTFOLIOAI_RESTORE_DATABASE_URL" \
+  --use-list "$workdir/database.filtered.toc" --section=post-data \
+  --exit-on-error --single-transaction \
   --no-owner "$workdir/database.dump"
 
 psql "$PORTFOLIOAI_RESTORE_DATABASE_URL" -XAtqc "select count(*) from public.profiles" >/dev/null

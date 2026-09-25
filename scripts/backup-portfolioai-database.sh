@@ -43,7 +43,7 @@ pg_dump "$PORTFOLIOAI_DATABASE_URL" \
 
 mapfile -t auth_table_names < <(
   psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c \
-    "select table_name from information_schema.tables where table_schema='auth' and table_type='BASE TABLE' and table_name not in ('schema_migrations','instances','flow_state') order by table_name"
+    "select table_name from information_schema.tables where table_schema='auth' and table_type='BASE TABLE' and table_name not in ('schema_migrations','flow_state') order by table_name"
 )
 auth_tables=()
 for table in "${auth_table_names[@]}"; do

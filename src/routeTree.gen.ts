@@ -16,6 +16,9 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppHoldingsRouteImport } from './routes/_app.holdings'
+import { Route as AppMarketDataEodRouteImport } from './routes/_app.market-data-eod'
+import { Route as AppMarketDataEodBackfillRouteImport } from './routes/_app.market-data-eod-backfill'
+import { Route as AppMarketDataEodPilotRouteImport } from './routes/_app.market-data-eod-pilot'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppTransactionsRouteImport } from './routes/_app.transactions'
 import { Route as AppImportIndexRouteImport } from './routes/_app.import.index'
@@ -55,6 +58,22 @@ const AppHoldingsRoute = AppHoldingsRouteImport.update({
   path: '/holdings',
   getParentRoute: () => AppRoute,
 } as any)
+const AppMarketDataEodRoute = AppMarketDataEodRouteImport.update({
+  id: '/market-data-eod',
+  path: '/market-data-eod',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppMarketDataEodBackfillRoute =
+  AppMarketDataEodBackfillRouteImport.update({
+    id: '/market-data-eod-backfill',
+    path: '/market-data-eod-backfill',
+    getParentRoute: () => AppRoute,
+  } as any)
+const AppMarketDataEodPilotRoute = AppMarketDataEodPilotRouteImport.update({
+  id: '/market-data-eod-pilot',
+  path: '/market-data-eod-pilot',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSettingsRoute = AppSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -83,6 +102,9 @@ export interface FileRoutesByFullPath {
   '/reset-password': typeof ResetPasswordRoute
   '/dashboard': typeof AppDashboardRoute
   '/holdings': typeof AppHoldingsRoute
+  '/market-data-eod': typeof AppMarketDataEodRoute
+  '/market-data-eod-backfill': typeof AppMarketDataEodBackfillRoute
+  '/market-data-eod-pilot': typeof AppMarketDataEodPilotRoute
   '/settings': typeof AppSettingsRoute
   '/transactions': typeof AppTransactionsRoute
   '/import/$batchId': typeof AppImportBatchIdRoute
@@ -95,6 +117,9 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/dashboard': typeof AppDashboardRoute
   '/holdings': typeof AppHoldingsRoute
+  '/market-data-eod': typeof AppMarketDataEodRoute
+  '/market-data-eod-backfill': typeof AppMarketDataEodBackfillRoute
+  '/market-data-eod-pilot': typeof AppMarketDataEodPilotRoute
   '/settings': typeof AppSettingsRoute
   '/transactions': typeof AppTransactionsRoute
   '/import/$batchId': typeof AppImportBatchIdRoute
@@ -109,6 +134,9 @@ export interface FileRoutesById {
   '/reset-password': typeof ResetPasswordRoute
   '/_app/dashboard': typeof AppDashboardRoute
   '/_app/holdings': typeof AppHoldingsRoute
+  '/_app/market-data-eod': typeof AppMarketDataEodRoute
+  '/_app/market-data-eod-backfill': typeof AppMarketDataEodBackfillRoute
+  '/_app/market-data-eod-pilot': typeof AppMarketDataEodPilotRoute
   '/_app/settings': typeof AppSettingsRoute
   '/_app/transactions': typeof AppTransactionsRoute
   '/_app/import/$batchId': typeof AppImportBatchIdRoute
@@ -123,6 +151,9 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/dashboard'
     | '/holdings'
+    | '/market-data-eod'
+    | '/market-data-eod-backfill'
+    | '/market-data-eod-pilot'
     | '/settings'
     | '/transactions'
     | '/import/$batchId'
@@ -135,6 +166,9 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/dashboard'
     | '/holdings'
+    | '/market-data-eod'
+    | '/market-data-eod-backfill'
+    | '/market-data-eod-pilot'
     | '/settings'
     | '/transactions'
     | '/import/$batchId'
@@ -148,6 +182,9 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/_app/dashboard'
     | '/_app/holdings'
+    | '/_app/market-data-eod'
+    | '/_app/market-data-eod-backfill'
+    | '/_app/market-data-eod-pilot'
     | '/_app/settings'
     | '/_app/transactions'
     | '/_app/import/$batchId'
@@ -213,6 +250,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppHoldingsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/market-data-eod': {
+      id: '/_app/market-data-eod'
+      path: '/market-data-eod'
+      fullPath: '/market-data-eod'
+      preLoaderRoute: typeof AppMarketDataEodRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/market-data-eod-backfill': {
+      id: '/_app/market-data-eod-backfill'
+      path: '/market-data-eod-backfill'
+      fullPath: '/market-data-eod-backfill'
+      preLoaderRoute: typeof AppMarketDataEodBackfillRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/market-data-eod-pilot': {
+      id: '/_app/market-data-eod-pilot'
+      path: '/market-data-eod-pilot'
+      fullPath: '/market-data-eod-pilot'
+      preLoaderRoute: typeof AppMarketDataEodPilotRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/settings': {
       id: '/_app/settings'
       path: '/settings'
@@ -247,6 +305,9 @@ declare module '@tanstack/react-router' {
 interface AppRouteChildren {
   AppDashboardRoute: typeof AppDashboardRoute
   AppHoldingsRoute: typeof AppHoldingsRoute
+  AppMarketDataEodRoute: typeof AppMarketDataEodRoute
+  AppMarketDataEodBackfillRoute: typeof AppMarketDataEodBackfillRoute
+  AppMarketDataEodPilotRoute: typeof AppMarketDataEodPilotRoute
   AppSettingsRoute: typeof AppSettingsRoute
   AppTransactionsRoute: typeof AppTransactionsRoute
   AppImportBatchIdRoute: typeof AppImportBatchIdRoute
@@ -256,6 +317,9 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppDashboardRoute: AppDashboardRoute,
   AppHoldingsRoute: AppHoldingsRoute,
+  AppMarketDataEodRoute: AppMarketDataEodRoute,
+  AppMarketDataEodBackfillRoute: AppMarketDataEodBackfillRoute,
+  AppMarketDataEodPilotRoute: AppMarketDataEodPilotRoute,
   AppSettingsRoute: AppSettingsRoute,
   AppTransactionsRoute: AppTransactionsRoute,
   AppImportBatchIdRoute: AppImportBatchIdRoute,
