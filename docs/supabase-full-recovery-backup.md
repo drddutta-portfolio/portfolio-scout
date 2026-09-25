@@ -26,6 +26,7 @@ The workflow never runs on push or schedule.
 - the physical files from all Storage buckets except the dedicated backup bucket;
 - the source of deployed Edge Functions downloadable through the Supabase CLI;
 - the repository's Edge Function source, migrations, workflows and documentation at the backup commit;
+- a redacted snapshot of non-secret database/pooler/Auth/Data API/Realtime/Storage configuration exposed by the Supabase Management API when the access token permits it;
 - a manifest and SHA-256 checksum inventory.
 
 ## Intentionally not included
@@ -37,6 +38,8 @@ The workflow does **not** attempt to export:
 - OAuth client secret values;
 - target/project API keys that Supabase regenerates;
 - project/platform configuration that Supabase does not expose in a safely exportable form.
+
+The Management API snapshot is deliberately scrubbed of fields whose names look like secrets, passwords, tokens, API keys, or private keys before it is placed in the encrypted bundle.
 
 The absence of secret values is deliberate.
 
