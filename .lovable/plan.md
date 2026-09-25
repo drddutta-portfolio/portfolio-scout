@@ -2,98 +2,160 @@
 
 ## Goal
 
-Add GitHub Actions workflows that create a restorable PostgreSQL backup of PortfolioAI’s dedicated Supabase database—including application data and Auth records—and retain it in a private Supabase Storage bucket. Add a separately triggered, strongly guarded recovery workflow capable of rebuilding the database from a selected backup.
+Add manual GitHub Actions workflows that create an encrypted, restorable PostgreSQL backup of PortfolioAI’s dedicated Supabase database—including application rows and Auth records—and store it in a private Supabase Storage bucket. Add a separately triggered, strongly guarded recovery workflow.
 
-This changes GitHub automation and documentation only. It does not run a backup, restore data, modify migrations, change the app, or alter the live database during implementation.
+This implementation changes workflow/documentation files only. It does not run against the live database, alter migrations, change the app, or perform a restore.
 
-## Important recovery boundary
+## Recovery guarantee and boundary
 
-The backup will reproduce all database objects and rows the Supabase database owner can export: application schemas and data, Auth schema/data, functions, views, triggers, RLS policies, grants, sequences, extensions metadata, and accessible roles. It cannot reproduce Supabase platform configuration outside PostgreSQL, such as project settings, Edge Function source/secrets, OAuth provider settings, custom domains, or Storage object file contents. Those require separate exports/configuration.
+The deliverable is not considered recovery-ready merely because `pg_dump` succeeds. Completion has two stages:
 
-Keeping the only backup inside the same Supabase project is not disaster-independent: if that project or its Storage becomes unavailable, the backup may also be unavailable. This implementation will follow the requested private Supabase bucket destination, while documenting that a later second copy outside the project is recommended.
+1. **Workflow implementation:** YAML and documentation are committed, with no live execution.
+2. **Recovery certification:** the user supplies a disposable Supabase project, manually runs a backup, restores it into that disposable project, and the documented verification passes. This test is mandatory and cannot be silently skipped before claiming the backup can reproduce the database.
 
-## Files to add
+The database archive covers application schemas and rows, Auth rows, functions, views, triggers, RLS policies, grants, sequences, and extension declarations that PostgreSQL permits the connection to read. It does not reproduce Supabase project-level settings, Edge Function source/secrets, OAuth provider configuration, custom domains, or physical Storage files.
 
-### `.github/workflows/backup-supabase-database.yml`
+## 1. Database connection: Supavisor session mode
 
-Manual `workflow_dispatch` only:
+GitHub-hosted runners will use the **Supavisor pooler in session mode**, not transaction mode and not the IPv6-only direct hostname. This avoids requiring Supabase’s IPv4 add-on while retaining session semantics needed by `pg_dump`/`pg_restore`.
 
-1. Validate required GitHub Actions secrets without printing values.
-2. Install a pinned PostgreSQL 17 client to match the deployed PostgreSQL major version.
-3. Create two dumps:
-   - `database.dump`: custom-format `pg_dump` of every accessible non-system schema, including schema definitions and all row data (including `auth`).
-   - `roles.sql`: `pg_dumpall --roles-only`, filtered only where needed for Supabase-managed restrictions while retaining restorable role/grant definitions.
-4. Generate a plaintext manifest with UTC timestamp, project reference, PostgreSQL version, dump format/version, SHA-256 checksums, and file sizes—never credentials.
-5. Package the dump, role file, manifest, and a generated restore README into one timestamped archive.
-6. Upload it to a configured private Supabase Storage bucket/path using Supabase Storage’s S3-compatible endpoint and dedicated Storage access credentials.
-7. Verify the remote object exists and its uploaded size matches; do not expose a public URL.
-8. Always delete local dump files from the runner.
-9. Use least-privilege GitHub permissions (`contents: read`), no schedule, no commits, concurrency protection, timeout, and shell fail-fast behavior.
-
-Suggested object key:
+GitHub secret `PORTFOLIOAI_DATABASE_URL` must use the project’s **Session pooler** connection string copied from Supabase Dashboard → Connect, in this form:
 
 ```text
-database-backups/portfolioai/portfolioai-db-YYYYMMDDTHHMMSSZ.tar.gz
+postgresql://postgres.<project-ref>:<password>@<region>.pooler.supabase.com:5432/postgres?sslmode=require
 ```
 
-### `.github/workflows/restore-supabase-database.yml`
+The workflow validates that the hostname contains `.pooler.supabase.com`, the port is `5432`, and the username is `postgres.<project-ref>`. It rejects port `6543` (transaction mode). No connection value is printed.
 
-Separate manual-only recovery workflow:
+If the project later gains the IPv4 add-on, direct connectivity may be adopted only through a reviewed workflow change.
 
-1. Require explicit inputs:
-   - exact private Storage object key;
-   - target project reference;
-   - typed confirmation phrase `RESTORE PORTFOLIOAI DATABASE`;
-   - acknowledgement that current target data will be replaced.
-2. Require a protected GitHub Environment named `database-recovery`, allowing repository owners to configure required reviewers before this workflow can run.
-3. Download the selected private archive with Storage S3 credentials.
-4. Verify archive path safety and SHA-256 checksums before any database connection.
-5. Verify the backup’s PostgreSQL major version and target project reference; stop on mismatch unless a separate explicit cross-project recovery input is supplied.
-6. Run a preflight inventory and connection check before destructive operations.
-7. Restore roles first where permitted, then restore the custom-format database dump with deterministic `pg_restore` options, transaction/error-stop safeguards, and no secrets in logs.
-8. Run read-only post-restore checks for expected PortfolioAI schemas/tables, Auth rows, migration objects, functions, RLS-enabled tables, and key row counts recorded in the manifest.
-9. Delete downloaded backup material from the runner even on failure.
+## 2. Backup workflow
 
-The recovery workflow will not be run while building this feature.
+Add `.github/workflows/backup-supabase-database.yml`, triggered only by `workflow_dispatch`:
 
-## Supporting documentation
+1. Validate required secrets without printing values.
+2. Install a pinned PostgreSQL 17 client matching the deployed database major version.
+3. Confirm the connection is the approved session-pooler endpoint and read the server version.
+4. Create:
+   - `database.dump`: custom-format dump of application schemas, definitions, and row data.
+   - `auth-data.dump`: a separately identifiable data-only dump of the `auth` schema for controlled recovery.
+   - `globals.sql`: only project-created roles if any are explicitly allowlisted; Supabase system roles are not dumped or recreated.
+   - `manifest.json`: UTC timestamp, source project ref, PostgreSQL/client versions, included schemas, object/row inventories, file sizes, and SHA-256 hashes—never credentials.
+5. Package those files with a generated recovery README.
+6. Encrypt the package before upload using `age` with a public recipient key stored as a GitHub variable. The private recovery key is never placed in Supabase, the repository, or ordinary workflow secrets; it is retained offline by the owner. Only the `.age` ciphertext is uploaded.
+7. Upload the encrypted archive to the configured private Supabase Storage bucket through its S3-compatible endpoint and dedicated S3 credentials.
+8. Verify the remote encrypted object exists and its byte size matches; never generate a public URL.
+9. Upload the same encrypted archive as a short-retention private GitHub Actions artifact (for example, 7 days). This is the concrete minimal off-project second copy and avoids a same-project single point of failure.
+10. Securely remove runner files in an `always()` cleanup step.
 
-Add `docs/database-backup-and-recovery.md` covering:
+Object key:
 
-- What is and is not included.
-- One-time setup for a **private** bucket and GitHub Environment protection.
-- Required GitHub repository secrets, stored only in GitHub Actions:
-  - `PORTFOLIOAI_DATABASE_URL`: direct PostgreSQL connection string for database owner-level dump/restore access.
-  - `PORTFOLIOAI_SUPABASE_PROJECT_REF`: target project reference (may instead be a non-secret repository variable).
-  - `PORTFOLIOAI_STORAGE_S3_ACCESS_KEY_ID` and `PORTFOLIOAI_STORAGE_S3_SECRET_ACCESS_KEY`: dedicated S3-compatible Storage credentials used only for the private backup bucket.
-  - `PORTFOLIOAI_BACKUP_BUCKET`: private bucket name (prefer a non-secret repository variable).
-- The Storage credentials are preferred over introducing a service-role key; no service-role credential enters the application or repository.
-- How to trigger a backup, inspect its manifest, apply retention manually, test a restore into a disposable Supabase project, and invoke production recovery only after approval.
-- A warning that a backup is not proven until a test restore succeeds.
-- Separate export requirements for Storage objects and Supabase platform/Edge Function configuration.
+```text
+database-backups/portfolioai/portfolioai-db-YYYYMMDDTHHMMSSZ.tar.age
+```
 
-## Security controls
+## 3. Auth restore handling
 
-- No credentials in YAML, source, artifacts, command output, manifests, or documentation examples.
-- GitHub secrets are masked and passed only to the exact steps that need them.
-- Connection strings are never placed in command arguments where avoidable; use `PG*` environment variables derived without echoing.
-- Backup bucket must already exist and be private; workflows fail rather than create or make a bucket public.
-- Backup workflow has no restore/delete capability against the database.
-- Restore workflow uses a protected environment, exact confirmation phrase, target-project check, checksum verification, and manual dispatch only.
-- Archives are not published as GitHub artifacts and receive no public/signed URL.
+The workflow must not treat `auth` like an ordinary owner-restorable schema. Supabase owns it through `supabase_auth_admin`, and a new project already contains Supabase Auth migrations and objects.
 
-## Validation before delivery
+Recovery therefore uses this controlled approach:
 
-- Parse both YAML files and validate GitHub Actions structure.
-- Run ShellCheck against extracted shell blocks where practical.
-- Confirm workflow permissions are read-only and both triggers are manual only.
-- Confirm no secret-shaped values are present and existing application/migration files are untouched.
-- Confirm no workflow was dispatched, no live database/storage operation occurred, and no bucket or migration was created.
-- Document that the first real backup and a test restore into a disposable project are still required to establish recoverability.
+- Never drop or recreate the target project’s `auth` schema.
+- Never restore Auth schema DDL or ownership from the source.
+- Require a freshly created disposable/target Supabase project at a compatible Auth schema version.
+- Restore application schema/data first.
+- Restore only compatible Auth table data from `auth-data.dump`, using a reviewed table allowlist and target-side ownership; exclude migration/version bookkeeping and Supabase-managed internal configuration tables.
+- Use `--no-owner --no-privileges` for Auth data and perform preflight column/schema comparisons. Any mismatch stops recovery before Auth data writes.
+- Restore Auth data in a transaction with constraints deferred where supported; failure rolls back that stage.
+- Re-run Supabase Auth/API smoke checks after restore (user counts, identity links, sign-in/session behavior using a designated test user) without printing personal information.
 
-## Deliberately not included
+Because Supabase can change its managed Auth schema, the exact Auth allowlist is derived from and recorded by the first backup, then validated against the disposable target. The mandatory disposable-project restore determines whether the result is certifiable. If Supabase permissions prevent safe Auth data restoration, the workflow stops and documentation states that full Auth recovery requires Supabase’s managed backup/PITR/support path; it will not weaken permissions or claim exact recovery.
 
-- Scheduled backups or automatic retention deletion.
-- Live execution during implementation.
-- Application, database migration, RLS, Auth, Edge Function, or UI changes.
-- Storage object-content backup, Edge Function secrets, or provider configuration export.
+## 4. Roles and grants
+
+Do **not** restore an unfiltered `pg_dumpall --roles-only` output.
+
+- Exclude all pre-existing Supabase/platform roles, including `postgres`, `anon`, `authenticated`, `service_role`, `authenticator`, `supabase_admin`, `supabase_auth_admin`, `supabase_storage_admin`, dashboard/replication roles, and any `pg_*` role.
+- Inventory project-created roles separately and include only names explicitly allowlisted in the workflow configuration.
+- Application object grants to existing `anon`, `authenticated`, and `service_role` are carried by the application-schema dump and reapplied only after the pre-existing target roles are confirmed.
+- Restore with `--no-owner`; map application object ownership to the target’s `postgres` role rather than attempting to recreate source ownership.
+- Role/grant SQL is parsed defensively and run with error-stop behavior; no `CREATE ROLE` for Supabase system roles is generated.
+
+## 5. Storage metadata/file divergence risk
+
+Document a named risk: **orphaned Storage metadata after database recovery**. Database rows such as `storage.objects` can name files, but `pg_dump` does not include the binary objects stored in Supabase Storage. Restoring metadata without files can leave broken references.
+
+For the first pass:
+
+- Exclude Supabase-managed `storage` schema DDL from generic restore.
+- Inventory Storage metadata in the manifest for audit only; do not restore it as though the binaries existed.
+- After recovery, run a documented reconciliation that lists restored/expected object keys and compares them with actual bucket object listings; report missing binaries and metadata-only entries.
+- A separate Storage-object export is required for full file recovery and is explicitly outside this first database-backup workflow.
+
+## 6. Guarded restore workflow
+
+Add `.github/workflows/restore-supabase-database.yml`, manual-only:
+
+1. Require the exact private object key, source and target project refs, acknowledgement that target data will be replaced, and typed phrase `RESTORE PORTFOLIOAI DATABASE`.
+2. Run under a protected GitHub Environment named `database-recovery`, where repository owners configure required reviewers.
+3. Require an explicit `disposable_test` mode until recovery certification has passed. Production mode remains disabled by a repository variable such as `PORTFOLIOAI_PRODUCTION_RESTORE_CERTIFIED=false`.
+4. Download the ciphertext, decrypt with an `age` private key supplied only to the protected recovery environment, reject unsafe archive paths, and verify manifest hashes.
+5. Verify source metadata, target project ref, PostgreSQL major version, application migration inventory, and Auth schema compatibility.
+6. Take a fresh pre-restore backup of the target before any destructive operation.
+7. Restore permitted project-created roles, then application schemas/data with deterministic `pg_restore` options, ownership mapping, error-stop behavior, and the narrow Auth process above.
+8. Run read-only checks for expected migrations, schemas, functions, views, RLS policies, grants, Auth counts/identity integrity, and representative application row counts captured in the manifest.
+9. Run the Storage metadata/object reconciliation and report divergence.
+10. Delete decrypted material and database credentials from the runner in an `always()` cleanup step.
+
+The workflow is created but not dispatched in this implementation.
+
+## 7. Required GitHub configuration
+
+Document these repository/environment values:
+
+- Secret `PORTFOLIOAI_DATABASE_URL`: source Session pooler URL.
+- Protected-environment secret `PORTFOLIOAI_RESTORE_DATABASE_URL`: target Session pooler URL.
+- Variable `PORTFOLIOAI_SUPABASE_PROJECT_REF`.
+- Secret `PORTFOLIOAI_STORAGE_S3_ACCESS_KEY_ID`.
+- Secret `PORTFOLIOAI_STORAGE_S3_SECRET_ACCESS_KEY`.
+- Variable `PORTFOLIOAI_BACKUP_BUCKET` (must already exist and be private).
+- Variable `PORTFOLIOAI_AGE_RECIPIENT`: public encryption recipient.
+- Protected-environment secret `PORTFOLIOAI_AGE_IDENTITY`: private decryption identity.
+- Variable `PORTFOLIOAI_PRODUCTION_RESTORE_CERTIFIED`, initially `false`.
+
+The workflows use dedicated Storage S3 credentials; they do not introduce a service-role key into the app or repository.
+
+## 8. Documentation and certification checklist
+
+Add `docs/database-backup-and-recovery.md` covering setup, connection format, encryption-key custody, manual backup, private object inspection, off-project artifact download, retention, restore gates, Auth limitations, Storage divergence, and platform configuration exclusions.
+
+The certification checklist requires an actual disposable-project test after implementation:
+
+- Backup completes and encrypted copies exist in both destinations.
+- Archive decrypts and all hashes match.
+- Application schema, data, functions, policies, grants, and migrations match expected inventories.
+- Auth data restore succeeds without replacing managed Auth DDL; a designated test login works.
+- No Supabase system role creation conflicts occur.
+- Storage reconciliation identifies metadata/binary differences accurately.
+- A second backup after restore can be generated.
+
+Production restore remains disabled until these checks are recorded as passed. If the user does not provide a disposable project, implementation can finish but recovery remains **uncertified**.
+
+## 9. Static validation before delivery
+
+- Parse both YAML files and validate action structure.
+- Run ShellCheck against shell blocks where practical.
+- Confirm both triggers are manual-only and permissions are least privilege.
+- Confirm transaction-mode pooler endpoints are rejected.
+- Confirm archives uploaded to either destination are encrypted ciphertext only.
+- Confirm no broad role restoration or managed Auth schema replacement exists.
+- Scan for secret-shaped values.
+- Confirm no workflow was dispatched, no database/Storage operation occurred, and no migration/app file changed.
+
+## Out of scope
+
+- Scheduled execution and automatic deletion retention.
+- Running the first backup or mandatory disposable-project recovery certification in the implementation turn.
+- Physical Supabase Storage-object backup.
+- Supabase project settings, Auth provider configuration, Edge Function code/secrets, custom domains, or external-provider configuration.
+- Application, migration, RLS, Edge Function, or UI changes.
