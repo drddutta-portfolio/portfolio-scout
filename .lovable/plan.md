@@ -144,7 +144,7 @@ Production restore remains disabled until these checks are recorded as passed. I
 
 - Parse the backup YAML and validate action structure; syntax-check the offline restore script without connecting to a database.
 - Run ShellCheck against shell blocks where practical.
-- Confirm both triggers are manual-only and permissions are least privilege.
+- Confirm the backup trigger is manual-only and workflow permissions are least privilege.
 - Confirm transaction-mode pooler endpoints are rejected.
 - Confirm the archive uploaded to Storage is encrypted ciphertext only and no GitHub Actions artifact upload exists.
 - Confirm no broad role restoration or managed Auth schema replacement exists.
