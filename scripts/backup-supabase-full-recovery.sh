@@ -2,6 +2,13 @@
 set -Eeuo pipefail
 umask 077
 
+# GitHub-hosted Ubuntu runners may ship another PostgreSQL client version in
+# /usr/bin even after postgresql-client-17 is installed. Prefer the exact
+# PostgreSQL 17 client so pg_dump can safely dump the PostgreSQL 17 server.
+if [[ -d /usr/lib/postgresql/17/bin ]]; then
+  export PATH="/usr/lib/postgresql/17/bin:$PATH"
+fi
+
 for name in PORTFOLIOAI_DATABASE_URL PORTFOLIOAI_SUPABASE_PROJECT_REF \
   PORTFOLIOAI_BACKUP_BUCKET PORTFOLIOAI_STORAGE_REGION PORTFOLIOAI_AGE_RECIPIENT \
   SUPABASE_ACCESS_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
