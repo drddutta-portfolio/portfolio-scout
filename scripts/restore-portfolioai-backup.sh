@@ -176,11 +176,17 @@ if ((${#auth_tables[@]})); then
     separator=", "
   done
   truncate_sql+=" CASCADE;"
-  psql "$PORTFOLIOAI_RESTORE_DATABASE_URL" -X --set=ON_ERROR_STOP=1 -c "BEGIN; SET CONSTRAINTS ALL DEFERRED; $truncate_sql COMMIT;"
-  pg_restore \
-    --dbname "$PORTFOLIOAI_RESTORE_DATABASE_URL" \
-    --data-only --no-owner --no-privileges --exit-on-error --single-transaction \
-    "$workdir/auth-data.dump"
+  pg_restore --data-only --no-owner --no-privileges \
+    --file="$workdir/auth-data.sql" "$workdir/auth-data.dump"
+  {
+    echo 'BEGIN;'
+    echo 'SET CONSTRAINTS ALL DEFERRED;'
+    echo "$truncate_sql"
+    cat "$workdir/auth-data.sql"
+    echo 'COMMIT;'
+  } > "$workdir/auth-restore.sql"
+  psql "$PORTFOLIOAI_RESTORE_DATABASE_URL" -X --set=ON_ERROR_STOP=1 \
+    --file="$workdir/auth-restore.sql"
 fi
 
 psql "$PORTFOLIOAI_RESTORE_DATABASE_URL" -XAtqc "select count(*) from public.profiles" >/dev/null

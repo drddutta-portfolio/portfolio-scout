@@ -9,7 +9,7 @@ The repository provides a manual encrypted database backup workflow and a guarde
 The encrypted archive contains:
 
 - the complete `public` application schema and its row data;
-- supported Auth identity data from existing allowlisted tables (`users`, `identities`, `mfa_factors`, `mfa_amr_claims`, and `one_time_tokens` when present);
+- Auth data from accessible base tables except managed migration/configuration tables (`schema_migrations`, `instances`, and ephemeral `flow_state` are excluded); the exact included table/column inventory is recorded in each manifest;
 - application functions, views, triggers, constraints, RLS policies, grants, and sequences from `public`;
 - a manifest of PostgreSQL/client versions, installed extensions, public tables, Auth table columns/counts, checksums, and the private Storage object key;
 - an explicit empty project-role allowlist. PortfolioAI currently uses Supabase’s existing platform roles, so they are never recreated.
