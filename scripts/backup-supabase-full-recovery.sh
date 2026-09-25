@@ -30,19 +30,32 @@ endpoint="https://${PORTFOLIOAI_SUPABASE_PROJECT_REF}.storage.supabase.co/storag
 mkdir -p "$workdir/bundle/database" "$workdir/bundle/storage/files" \
   "$workdir/bundle/edge-functions" "$workdir/bundle/inventory"
 
+# Fail early if remote backup dependencies are not usable. These checks are
+# read-only and avoid spending time building a large archive that cannot be
+# completed or uploaded.
+pg_dump_version="$(pg_dump --version)"
+[[ "$pg_dump_version" == *" 17."* ]] || {
+  echo "PostgreSQL 17 pg_dump is required; found: $pg_dump_version" >&2
+  exit 1
+}
+aws s3api list-buckets --endpoint-url "$endpoint" >/dev/null
+aws s3api head-bucket --bucket "$PORTFOLIOAI_BACKUP_BUCKET" \
+  --endpoint-url "$endpoint" >/dev/null
+supabase functions list --project-ref "$PORTFOLIOAI_SUPABASE_PROJECT_REF" >/dev/null
+
 # 1) Forensic full logical database snapshot. This captures every database
 # object/data row the source postgres connection is allowed to read. It is an
 # archive source, not a promise that managed Supabase schemas can be replayed
 # blindly into another project.
 pg_dump "$PORTFOLIOAI_DATABASE_URL" \
-  --format=custom --compress=9 --no-owner --no-privileges \
+  --format=custom --compress=9 --no-owner \
   --file="$workdir/bundle/database/database-full.dump"
 pg_restore --list "$workdir/bundle/database/database-full.dump" \
   > "$workdir/bundle/inventory/database-full.toc"
 
 # 2) Recovery-friendly application dump.
 pg_dump "$PORTFOLIOAI_DATABASE_URL" \
-  --format=custom --compress=9 --schema=public --no-owner --no-privileges \
+  --format=custom --compress=9 --schema=public --no-owner \
   --file="$workdir/bundle/database/public.dump"
 pg_restore --list "$workdir/bundle/database/public.dump" \
   > "$workdir/bundle/inventory/public.toc"
@@ -221,6 +234,7 @@ jq -n \
       repository_edge_function_source:true,
       database_extensions_inventory:true,
       database_object_inventories:true,
+      database_acl_grants:true,
       redacted_project_configuration:true,
       migrations_and_workflows:true,
       edge_function_secret_values:false,
