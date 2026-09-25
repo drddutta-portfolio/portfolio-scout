@@ -6,6 +6,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   PORTFOLIOAI_RESTORE_DATABASE_URL='postgresql://...' \
+  PORTFOLIOAI_AGE_RECIPIENT='age1...' \
   ./scripts/restore-portfolioai-backup.sh \
     --archive /path/to/portfolioai-db-....tar.age \
     --identity /path/to/portfolioai-backup-key.txt \
@@ -46,6 +47,7 @@ done
 [[ -n "$source_ref" && -n "$target_ref" ]] || { echo "Source and target project refs are required." >&2; exit 2; }
 [[ "$confirmation" == "RESTORE PORTFOLIOAI DATABASE" ]] || { echo "Exact confirmation phrase required." >&2; exit 2; }
 [[ -n "${PORTFOLIOAI_RESTORE_DATABASE_URL:-}" ]] || { echo "PORTFOLIOAI_RESTORE_DATABASE_URL is required." >&2; exit 2; }
+[[ "${PORTFOLIOAI_AGE_RECIPIENT:-}" == age1* ]] || { echo "PORTFOLIOAI_AGE_RECIPIENT is required for the target safety backup." >&2; exit 2; }
 
 if [[ "$disposable_test" != true ]]; then
   [[ -n "$certification_file" && -f "$certification_file" ]] || {
@@ -64,7 +66,7 @@ done
 
 workdir="$(mktemp -d)"
 cleanup() {
-  unset PORTFOLIOAI_RESTORE_DATABASE_URL PGCONNECT_TIMEOUT
+  unset PORTFOLIOAI_RESTORE_DATABASE_URL PORTFOLIOAI_AGE_RECIPIENT PGCONNECT_TIMEOUT
   rm -rf "$workdir"
 }
 trap cleanup EXIT INT TERM
@@ -136,6 +138,24 @@ cat <<'WARNING'
 Preflight passed. This operation replaces application objects/data in the target.
 The script will not drop or recreate managed Auth or extension schemas.
 WARNING
+
+# Create an encrypted target safety backup before any destructive statement.
+safety_timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+safety_directory="${PORTFOLIOAI_SAFETY_BACKUP_DIR:-$PWD}"
+mkdir -p "$safety_directory"
+pg_dump "$PORTFOLIOAI_RESTORE_DATABASE_URL" \
+  --format=custom --compress=9 --schema=public --no-owner \
+  --file="$workdir/target-before-restore.dump"
+pg_dump "$PORTFOLIOAI_RESTORE_DATABASE_URL" \
+  --format=custom --compress=9 --data-only --schema=auth \
+  --no-owner --no-privileges \
+  --file="$workdir/target-auth-before-restore.dump"
+tar -C "$workdir" -cf "$workdir/target-before-restore.tar" \
+  target-before-restore.dump target-auth-before-restore.dump
+age --encrypt --recipient "$PORTFOLIOAI_AGE_RECIPIENT" \
+  --output "$safety_directory/portfolioai-target-before-restore-${safety_timestamp}.tar.age" \
+  "$workdir/target-before-restore.tar"
+echo "Encrypted target safety backup: $safety_directory/portfolioai-target-before-restore-${safety_timestamp}.tar.age"
 
 # Application restore. --clean applies only to objects listed in the public-schema dump.
 pg_restore \

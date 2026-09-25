@@ -102,6 +102,7 @@ Install PostgreSQL 17 client tools, `age`, `jq`, and standard shell tools. Use a
 
 ```bash
 export PORTFOLIOAI_RESTORE_DATABASE_URL='postgresql://postgres.TARGET_REF:...@...pooler.supabase.com:5432/postgres?sslmode=require'
+export PORTFOLIOAI_AGE_RECIPIENT='age1...'
 ./scripts/restore-portfolioai-backup.sh \
   --archive ./portfolioai-db-YYYYMMDDTHHMMSSZ.tar.age \
   --identity /offline/path/portfolioai-backup-key.txt \
@@ -111,7 +112,7 @@ export PORTFOLIOAI_RESTORE_DATABASE_URL='postgresql://postgres.TARGET_REF:...@..
   --confirm 'RESTORE PORTFOLIOAI DATABASE'
 ```
 
-The script verifies checksums, PostgreSQL version, extension presence, Auth table compatibility, project references, and safe archive paths before writes. It restores `public` with ownership mapped to the target’s existing `postgres` role. It does not recreate `anon`, `authenticated`, `service_role`, any `pg_*` role, or Supabase administrative roles.
+The script verifies checksums, PostgreSQL version, extension presence, Auth table compatibility, project references, and safe archive paths before writes. It then creates an encrypted safety backup of the target in the current directory (or `PORTFOLIOAI_SAFETY_BACKUP_DIR`) before replacement begins. It restores `public` with ownership mapped to the target’s existing `postgres` role. It does not recreate `anon`, `authenticated`, `service_role`, any `pg_*` role, or Supabase administrative roles.
 
 ## Certification checklist
 
