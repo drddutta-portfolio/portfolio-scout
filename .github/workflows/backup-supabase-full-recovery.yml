@@ -1,4 +1,4 @@
-name: Backup Supabase full recovery bundle
+name: Backup Supabase full recovery bundle v2
 
 on:
   workflow_dispatch:
