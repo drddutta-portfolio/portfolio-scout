@@ -104,4 +104,4 @@ jobs:
 
       - name: Build, encrypt and upload full recovery bundle
         shell: bash
-        run: ./scripts/backup-supabase-full-recovery.sh
+        run: bash ./scripts/backup-supabase-full-recovery.sh
