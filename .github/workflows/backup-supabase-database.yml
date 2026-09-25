@@ -26,6 +26,7 @@ jobs:
       AWS_DEFAULT_REGION: ${{ vars.PORTFOLIOAI_STORAGE_REGION }}
       AWS_EC2_METADATA_DISABLED: "true"
       PGCONNECT_TIMEOUT: "20"
+      DEBIAN_FRONTEND: noninteractive
 
     steps:
       - name: Checkout repository
@@ -35,13 +36,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo install -d /usr/share/postgresql-common/pgdg
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            -o /tmp/apt.postgresql.org.asc
-          sudo install -m 0644 /tmp/apt.postgresql.org.asc \
-            /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
+
+          # Fetch the PostgreSQL signing key and convert it to a binary
+          # keyring in batch mode. --batch --yes prevents gpg from ever
+          # trying to prompt on a controlling terminal (which does not
+          # exist on a CI runner and causes the "/dev/tty" failure).
+          sudo install -d -m 0755 /usr/share/keyrings
+          curl -fsSL --retry 3 https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | gpg --batch --yes --dearmor -o /tmp/postgresql-archive-keyring.gpg
+          sudo install -m 0644 /tmp/postgresql-archive-keyring.gpg \
+            /usr/share/keyrings/postgresql-archive-keyring.gpg
+          rm -f /tmp/postgresql-archive-keyring.gpg
+
+          echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends postgresql-client-17 age awscli jq
 
