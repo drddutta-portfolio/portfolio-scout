@@ -8,3 +8,5 @@
 > Commits you push to the connected branch sync back to Lovable and show up in
 > the editor, so keep the branch in a working state.
 <!-- LOVABLE:END -->
+
+- Keep database backups manual, age-encrypted, and stored privately; keep decryption identities offline and require disposable-project restore certification — this prevents an unverified or same-project-only copy from being mistaken for recoverability.

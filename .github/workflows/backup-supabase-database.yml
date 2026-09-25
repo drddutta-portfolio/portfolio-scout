@@ -1,0 +1,73 @@
+name: Backup Supabase database
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-supabase-database
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Encrypt and store database backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PORTFOLIOAI_DATABASE_URL: ${{ secrets.PORTFOLIOAI_DATABASE_URL }}
+      PORTFOLIOAI_SUPABASE_PROJECT_REF: ${{ vars.PORTFOLIOAI_SUPABASE_PROJECT_REF }}
+      PORTFOLIOAI_BACKUP_BUCKET: ${{ vars.PORTFOLIOAI_BACKUP_BUCKET }}
+      PORTFOLIOAI_STORAGE_REGION: ${{ vars.PORTFOLIOAI_STORAGE_REGION }}
+      PORTFOLIOAI_AGE_RECIPIENT: ${{ vars.PORTFOLIOAI_AGE_RECIPIENT }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.PORTFOLIOAI_STORAGE_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.PORTFOLIOAI_STORAGE_S3_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ vars.PORTFOLIOAI_STORAGE_REGION }}
+      AWS_EC2_METADATA_DISABLED: "true"
+      PGCONNECT_TIMEOUT: "20"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL 17 and encryption tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client-17 age awscli jq
+
+      - name: Validate configuration and connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in PORTFOLIOAI_DATABASE_URL PORTFOLIOAI_SUPABASE_PROJECT_REF \
+            PORTFOLIOAI_BACKUP_BUCKET PORTFOLIOAI_STORAGE_REGION PORTFOLIOAI_AGE_RECIPIENT \
+            AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            test -n "${!name:-}" || { echo "Missing required GitHub configuration: $name" >&2; exit 1; }
+          done
+          python3 - "$PORTFOLIOAI_DATABASE_URL" "$PORTFOLIOAI_SUPABASE_PROJECT_REF" <<'PY'
+          import sys
+          from urllib.parse import urlparse
+          parsed = urlparse(sys.argv[1])
+          ref = sys.argv[2]
+          if parsed.scheme not in {'postgres', 'postgresql'}:
+              raise SystemExit('Database URL must be a PostgreSQL URL.')
+          if parsed.port != 5432 or not (parsed.hostname or '').endswith('.pooler.supabase.com'):
+              raise SystemExit('Use the Supavisor session pooler on port 5432; transaction mode is not supported.')
+          if parsed.username != f'postgres.{ref}':
+              raise SystemExit('Database URL username does not match the configured project ref.')
+          PY
+          server_major="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtqc "select current_setting('server_version_num')::int / 10000")"
+          test "$server_major" = "17" || { echo "Expected PostgreSQL 17, found major $server_major." >&2; exit 1; }
+          [[ "$PORTFOLIOAI_AGE_RECIPIENT" == age1* ]] || { echo "Invalid age recipient." >&2; exit 1; }
+
+      - name: Create, encrypt, and upload backup
+        shell: bash
+        run: ./scripts/backup-portfolioai-database.sh
