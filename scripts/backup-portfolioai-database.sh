@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+for name in PORTFOLIOAI_DATABASE_URL PORTFOLIOAI_SUPABASE_PROJECT_REF \
+  PORTFOLIOAI_BACKUP_BUCKET PORTFOLIOAI_STORAGE_REGION PORTFOLIOAI_AGE_RECIPIENT \
+  AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+  [[ -n "${!name:-}" ]] || { echo "Missing required GitHub configuration: $name" >&2; exit 1; }
+done
+
+for command in age aws jq pg_dump psql sha256sum tar; do
+  command -v "$command" >/dev/null || { echo "Required command missing: $command" >&2; exit 1; }
+done
+
+python3 - "$PORTFOLIOAI_DATABASE_URL" "$PORTFOLIOAI_SUPABASE_PROJECT_REF" <<'PY'
+import sys
+from urllib.parse import urlparse
+parsed = urlparse(sys.argv[1])
+ref = sys.argv[2]
+if parsed.scheme not in {'postgres', 'postgresql'}:
+    raise SystemExit('Database URL must be a PostgreSQL URL.')
+if parsed.port != 5432 or not (parsed.hostname or '').endswith('.pooler.supabase.com'):
+    raise SystemExit('Use the Supavisor session pooler on port 5432; transaction mode is not supported.')
+if parsed.username != f'postgres.{ref}':
+    raise SystemExit('Database URL username does not match the configured project ref.')
+PY
+[[ "$PORTFOLIOAI_AGE_RECIPIENT" == age1* ]] || { echo "Invalid age recipient." >&2; exit 1; }
+
+server_major="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtqc "select current_setting('server_version_num')::int / 10000")"
+[[ "$server_major" == "17" ]] || { echo "Expected PostgreSQL 17, found major $server_major." >&2; exit 1; }
+
+workdir="$(mktemp -d)"
+cleanup() { rm -rf "$workdir"; }
+trap cleanup EXIT INT TERM
+
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+object_key="database-backups/portfolioai/portfolioai-db-${timestamp}.tar.age"
+endpoint="https://${PORTFOLIOAI_SUPABASE_PROJECT_REF}.storage.supabase.co/storage/v1/s3"
+
+pg_dump "$PORTFOLIOAI_DATABASE_URL" \
+  --format=custom --compress=9 --schema=public \
+  --no-owner --file="$workdir/database.dump"
+
+mapfile -t auth_table_names < <(
+  psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c \
+    "select table_name from information_schema.tables where table_schema='auth' and table_type='BASE TABLE' and table_name not in ('schema_migrations','instances','flow_state') order by table_name"
+)
+auth_tables=()
+for table in "${auth_table_names[@]}"; do
+  [[ "$table" =~ ^[a-z_][a-z0-9_]*$ ]] || { echo "Unsafe Auth table name." >&2; exit 1; }
+  auth_tables+=("--table=auth.$table")
+done
+((${#auth_tables[@]} > 0)) || { echo "No approved Auth tables were accessible." >&2; exit 1; }
+pg_dump "$PORTFOLIOAI_DATABASE_URL" \
+  --format=custom --compress=9 --data-only --schema=auth \
+  --no-owner --no-privileges "${auth_tables[@]}" \
+  --file="$workdir/auth-data.dump"
+
+printf '%s\n' '-- No project-created roles are allowlisted for this backup format.' > "$workdir/globals.sql"
+
+extension_json="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c "select coalesce(jsonb_agg(jsonb_build_object('name', extname, 'version', extversion) order by extname), '[]'::jsonb) from pg_catalog.pg_extension")"
+table_json="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c "select coalesce(jsonb_agg(format('%I.%I', schemaname, tablename) order by schemaname, tablename), '[]'::jsonb) from pg_catalog.pg_tables where schemaname = 'public')"
+auth_json='{}'
+for table in "${auth_table_names[@]}"; do
+  columns="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq --set="table_name=$table" -c "select coalesce(jsonb_agg(column_name order by ordinal_position), '[]'::jsonb) from information_schema.columns where table_schema='auth' and table_name=:'table_name'")"
+  rows="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c "select count(*) from auth.\"$table\"")"
+  auth_json="$(jq -c --arg table "$table" --argjson columns "$columns" --argjson rows "$rows" '. + {($table): {columns: $columns, rows: $rows}}' <<<"$auth_json")"
+done
+
+# Metadata only: physical Storage files are deliberately not part of this database archive.
+psql "$PORTFOLIOAI_DATABASE_URL" -X --csv \
+  -c "select bucket_id, name from storage.objects order by bucket_id, name" \
+  > "$workdir/storage-inventory.csv"
+
+database_sha="$(sha256sum "$workdir/database.dump" | cut -d' ' -f1)"
+auth_sha="$(sha256sum "$workdir/auth-data.dump" | cut -d' ' -f1)"
+globals_sha="$(sha256sum "$workdir/globals.sql" | cut -d' ' -f1)"
+storage_sha="$(sha256sum "$workdir/storage-inventory.csv" | cut -d' ' -f1)"
+server_version="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtqc 'show server_version')"
+client_version="$(pg_dump --version | sed 's/^pg_dump (PostgreSQL) //')"
+
+jq -n \
+  --arg format_version "1" \
+  --arg created_at "$timestamp" \
+  --arg source_project_ref "$PORTFOLIOAI_SUPABASE_PROJECT_REF" \
+  --arg object_key "$object_key" \
+  --arg server_version "$server_version" \
+  --arg client_version "$client_version" \
+  --argjson extensions "$extension_json" \
+  --argjson public_tables "$table_json" \
+  --argjson auth_tables "$auth_json" \
+  --arg database_sha "$database_sha" \
+  --arg auth_sha "$auth_sha" \
+  --arg globals_sha "$globals_sha" \
+  --arg storage_sha "$storage_sha" \
+  --argjson database_size "$(stat -c%s "$workdir/database.dump")" \
+  --argjson auth_size "$(stat -c%s "$workdir/auth-data.dump")" \
+  --argjson globals_size "$(stat -c%s "$workdir/globals.sql")" \
+  --argjson storage_size "$(stat -c%s "$workdir/storage-inventory.csv")" \
+  '{format_version:$format_version, created_at_utc:$created_at, source_project_ref:$source_project_ref,
+    storage_object_key:$object_key, postgres_server_major:17, postgres_server_version:$server_version,
+    pg_dump_version:$client_version, included_schemas:["public"], extensions:$extensions,
+    public_tables:$public_tables, auth_tables:$auth_tables,
+    files:{"database.dump":{sha256:$database_sha,size:$database_size},
+           "auth-data.dump":{sha256:$auth_sha,size:$auth_size},
+           "globals.sql":{sha256:$globals_sha,size:$globals_size},
+           "storage-inventory.csv":{sha256:$storage_sha,size:$storage_size}}}' \
+  > "$workdir/manifest.json"
+
+cat > "$workdir/RESTORE-README.txt" <<'README'
+This archive contains sensitive PortfolioAI database and Auth data.
+Keep it private. Restore only with scripts/restore-portfolioai-backup.sh
+and docs/database-backup-and-recovery.md from the matching repository.
+Supabase-managed Auth DDL, extension DDL, and physical Storage objects
+are not restored automatically.
+README
+
+tar -C "$workdir" -cf "$workdir/backup.tar" \
+  database.dump auth-data.dump globals.sql storage-inventory.csv manifest.json RESTORE-README.txt
+age --encrypt --recipient "$PORTFOLIOAI_AGE_RECIPIENT" \
+  --output "$workdir/portfolioai-db-${timestamp}.tar.age" "$workdir/backup.tar"
+cipher_sha="$(sha256sum "$workdir/portfolioai-db-${timestamp}.tar.age" | cut -d' ' -f1)"
+cipher_size="$(stat -c%s "$workdir/portfolioai-db-${timestamp}.tar.age")"
+
+aws s3 cp "$workdir/portfolioai-db-${timestamp}.tar.age" \
+  "s3://${PORTFOLIOAI_BACKUP_BUCKET}/${object_key}" \
+  --endpoint-url "$endpoint" --only-show-errors
+remote_size="$(aws s3api head-object \
+  --bucket "$PORTFOLIOAI_BACKUP_BUCKET" --key "$object_key" \
+  --endpoint-url "$endpoint" --query ContentLength --output text)"
+[[ "$remote_size" == "$cipher_size" ]] || { echo "Remote size verification failed." >&2; exit 1; }
+
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+  {
+    echo "### PortfolioAI encrypted database backup"
+    echo ""
+    echo "- Private Storage object: \`$object_key\`"
+    echo "- Ciphertext SHA-256: \`$cipher_sha\`"
+    echo "- Encrypted size: $cipher_size bytes"
+    echo ""
+    echo "**Download this encrypted file to your local computer now. The backup is not disaster-independent until that download is complete.**"
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
