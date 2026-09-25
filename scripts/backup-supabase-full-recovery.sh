@@ -73,7 +73,12 @@ psql "$PORTFOLIOAI_DATABASE_URL" -X --csv \
   -c "select extname, extversion from pg_extension order by extname" \
   > "$workdir/bundle/inventory/extensions.csv"
 psql "$PORTFOLIOAI_DATABASE_URL" -X --csv \
-  -c "select schemaname, tablename, rowsecurity from pg_tables left join pg_class on pg_class.relname=pg_tables.tablename left join pg_namespace on pg_namespace.oid=pg_class.relnamespace and pg_namespace.nspname=pg_tables.schemaname where schemaname not in ('pg_catalog','information_schema') order by schemaname, tablename" \
+  -c "select t.schemaname, t.tablename, c.relrowsecurity as rowsecurity
+        from pg_tables t
+        join pg_namespace n on n.nspname=t.schemaname
+        join pg_class c on c.relnamespace=n.oid and c.relname=t.tablename
+       where t.schemaname not in ('pg_catalog','information_schema')
+       order by t.schemaname, t.tablename" \
   > "$workdir/bundle/inventory/tables.csv" || true
 psql "$PORTFOLIOAI_DATABASE_URL" -X --csv \
   -c "select schemaname, viewname from pg_views where schemaname not in ('pg_catalog','information_schema') order by schemaname, viewname" \
@@ -124,7 +129,37 @@ if [[ -d supabase/functions ]]; then
   cp -R supabase/functions "$workdir/bundle/edge-functions/repository-supabase/"
 fi
 
-# 7) Capture migrations and recovery-relevant repository configuration.
+# 7) Capture non-secret project/platform configuration exposed by the
+# Supabase Management API. Auth secret fields are returned as non-reversible
+# HMACs by Supabase; we additionally redact secret/password/token/key-shaped
+# fields before storing the snapshot. Failure to read this optional snapshot
+# does not invalidate the database/Storage/Edge Function backup.
+management_config="$workdir/bundle/inventory/project-config-redacted.json"
+if curl -fsS --retry 3 \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  "https://api.supabase.com/v2/projects/$PORTFOLIOAI_SUPABASE_PROJECT_REF/config" \
+  -o "$workdir/project-config.raw.json"; then
+  jq '
+    def scrub:
+      if type == "object" then
+        with_entries(
+          if (.key | ascii_downcase | test("secret|password|passwd|token|api[_-]?key|private[_-]?key|smtp_pass"))
+          then .value = "[REDACTED]"
+          else .value |= scrub
+          end
+        )
+      elif type == "array" then map(scrub)
+      else .
+      end;
+    scrub
+  ' "$workdir/project-config.raw.json" > "$management_config"
+  rm -f "$workdir/project-config.raw.json"
+else
+  printf '%s\n' '{"status":"unavailable","reason":"Management API config snapshot could not be read with the configured access token."}' \
+    > "$management_config"
+fi
+
+# 8) Capture migrations and recovery-relevant repository configuration.
 mkdir -p "$workdir/bundle/repository"
 for path in db/migrations .github/workflows docs; do
   if [[ -e "$path" ]]; then
@@ -132,7 +167,7 @@ for path in db/migrations .github/workflows docs; do
   fi
 done
 
-# 8) Manifest and integrity hashes.
+# 9) Manifest and integrity hashes.
 server_version="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtqc 'show server_version')"
 client_version="$(pg_dump --version | sed 's/^pg_dump (PostgreSQL) //')"
 supabase_cli_version="$(supabase --version | head -n1)"
@@ -179,6 +214,7 @@ jq -n \
       repository_edge_function_source:true,
       database_extensions_inventory:true,
       database_object_inventories:true,
+      redacted_project_configuration:true,
       migrations_and_workflows:true,
       edge_function_secret_values:false,
       provider_secret_values:false,
@@ -202,6 +238,7 @@ Contains:
 - Storage bucket/object inventories and physical files from every bucket except the dedicated backup bucket;
 - deployed Edge Function source downloadable through the Supabase CLI;
 - repository Edge Function source, migrations, workflows, and documentation;
+- redacted non-secret project/service configuration available through the Supabase Management API;
 - object inventories, versions, hashes, and manifest.
 
 Not contained:
