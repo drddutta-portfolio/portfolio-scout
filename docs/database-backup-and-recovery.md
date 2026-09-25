@@ -112,7 +112,7 @@ export PORTFOLIOAI_AGE_RECIPIENT='age1...'
   --confirm 'RESTORE PORTFOLIOAI DATABASE'
 ```
 
-The script verifies checksums, PostgreSQL version, extension presence, Auth table compatibility, project references, and safe archive paths before writes. It then creates an encrypted safety backup of the target in the current directory (or `PORTFOLIOAI_SAFETY_BACKUP_DIR`) before replacement begins. It restores `public` with ownership mapped to the target’s existing `postgres` role. It does not recreate `anon`, `authenticated`, `service_role`, any `pg_*` role, or Supabase administrative roles.
+The script verifies checksums, PostgreSQL version, extension presence, Auth table compatibility, project references, and safe archive paths before writes. It then creates an encrypted safety backup of the target in the current directory (or `PORTFOLIOAI_SAFETY_BACKUP_DIR`) before replacement begins. It restores compatible Auth data first without `CASCADE`, then restores `public` so RESTRICT references to `auth.users` remain valid. Ownership is mapped to the target’s existing `postgres` role. It does not recreate `anon`, `authenticated`, `service_role`, any `pg_*` role, or Supabase administrative roles.
 
 ## Certification checklist
 
