@@ -98,3 +98,9 @@
 - Holdings-sheet reconciliation now resolves each ticker to a canonical security through the same
   deterministic identity rules as imports and compares by security id; unresolved/ambiguous tickers
   are shown as not compared.
+
+## Database backup and recovery automation
+- [x] Manual GitHub Actions backup workflow prepared: PostgreSQL 17, Supavisor session mode only, encrypted `age` archive, private Supabase Storage upload, checksum/size verification, and immediate local-download reminder.
+- [x] Guarded offline restore script prepared: disposable-test gate, checksum/schema/extension/Auth preflight, no managed role or extension recreation.
+- [x] Recovery guide documents same-project single-point risk, offline key custody, Auth limitations, Storage metadata/file divergence, and mandatory disposable-project certification.
+- [ ] Recovery certification remains pending: run a real backup and restore it into a disposable Supabase project, then complete the documented checklist.

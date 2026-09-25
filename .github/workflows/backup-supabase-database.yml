@@ -1,0 +1,184 @@
+name: Backup Supabase database
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-supabase-database
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Encrypt and store database backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PORTFOLIOAI_DATABASE_URL: ${{ secrets.PORTFOLIOAI_DATABASE_URL }}
+      PORTFOLIOAI_SUPABASE_PROJECT_REF: ${{ vars.PORTFOLIOAI_SUPABASE_PROJECT_REF }}
+      PORTFOLIOAI_BACKUP_BUCKET: ${{ vars.PORTFOLIOAI_BACKUP_BUCKET }}
+      PORTFOLIOAI_STORAGE_REGION: ${{ vars.PORTFOLIOAI_STORAGE_REGION }}
+      PORTFOLIOAI_AGE_RECIPIENT: ${{ vars.PORTFOLIOAI_AGE_RECIPIENT }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.PORTFOLIOAI_STORAGE_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.PORTFOLIOAI_STORAGE_S3_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ vars.PORTFOLIOAI_STORAGE_REGION }}
+      AWS_EC2_METADATA_DISABLED: "true"
+      PGCONNECT_TIMEOUT: "20"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL 17 and encryption tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client-17 age awscli jq
+
+      - name: Validate configuration and connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in PORTFOLIOAI_DATABASE_URL PORTFOLIOAI_SUPABASE_PROJECT_REF \
+            PORTFOLIOAI_BACKUP_BUCKET PORTFOLIOAI_STORAGE_REGION PORTFOLIOAI_AGE_RECIPIENT \
+            AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            test -n "${!name:-}" || { echo "Missing required GitHub configuration: $name" >&2; exit 1; }
+          done
+          python3 - "$PORTFOLIOAI_DATABASE_URL" "$PORTFOLIOAI_SUPABASE_PROJECT_REF" <<'PY'
+          import sys
+          from urllib.parse import urlparse
+          parsed = urlparse(sys.argv[1])
+          ref = sys.argv[2]
+          if parsed.scheme not in {'postgres', 'postgresql'}:
+              raise SystemExit('Database URL must be a PostgreSQL URL.')
+          if parsed.port != 5432 or not (parsed.hostname or '').endswith('.pooler.supabase.com'):
+              raise SystemExit('Use the Supavisor session pooler on port 5432; transaction mode is not supported.')
+          if parsed.username != f'postgres.{ref}':
+              raise SystemExit('Database URL username does not match the configured project ref.')
+          PY
+          server_major="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtqc "select current_setting('server_version_num')::int / 10000")"
+          test "$server_major" = "17" || { echo "Expected PostgreSQL 17, found major $server_major." >&2; exit 1; }
+          age-keygen -y <<<"$PORTFOLIOAI_AGE_RECIPIENT" >/dev/null 2>&1 && {
+            echo "PORTFOLIOAI_AGE_RECIPIENT must be a public age recipient, not a private identity." >&2
+            exit 1
+          } || true
+          [[ "$PORTFOLIOAI_AGE_RECIPIENT" == age1* ]] || { echo "Invalid age recipient." >&2; exit 1; }
+
+      - name: Create, encrypt, and upload backup
+        id: backup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          workdir="$(mktemp -d)"
+          cleanup() { rm -rf "$workdir"; }
+          trap cleanup EXIT INT TERM
+
+          timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+          object_key="database-backups/portfolioai/portfolioai-db-${timestamp}.tar.age"
+          endpoint="https://${PORTFOLIOAI_SUPABASE_PROJECT_REF}.storage.supabase.co/storage/v1/s3"
+
+          pg_dump "$PORTFOLIOAI_DATABASE_URL" \
+            --format=custom --compress=9 --schema=public \
+            --no-owner --file="$workdir/database.dump"
+
+          auth_tables=()
+          for table in users identities mfa_factors mfa_amr_claims one_time_tokens; do
+            if psql "$PORTFOLIOAI_DATABASE_URL" -XAtq --set="table_name=$table" \
+              -c "select to_regclass('auth.' || :'table_name') is not null" | grep -qx t; then
+              auth_tables+=("--table=auth.$table")
+            fi
+          done
+          ((${#auth_tables[@]} > 0)) || { echo "No approved Auth tables were accessible." >&2; exit 1; }
+          pg_dump "$PORTFOLIOAI_DATABASE_URL" \
+            --format=custom --compress=9 --data-only --schema=auth \
+            --no-owner --no-privileges "${auth_tables[@]}" \
+            --file="$workdir/auth-data.dump"
+
+          printf '%s\n' '-- No project-created roles are allowlisted for this backup format.' > "$workdir/globals.sql"
+
+          extension_json="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c \
+            "select coalesce(jsonb_agg(jsonb_build_object('name', extname, 'version', extversion) order by extname), '[]'::jsonb) from pg_catalog.pg_extension")"
+          table_json="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c \
+            "select coalesce(jsonb_agg(format('%I.%I', schemaname, tablename) order by schemaname, tablename), '[]'::jsonb) from pg_catalog.pg_tables where schemaname = 'public')"
+          auth_json='{}'
+          for arg in "${auth_tables[@]}"; do
+            table="${arg#--table=auth.}"
+            columns="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq --set="table_name=$table" -c \
+              "select coalesce(jsonb_agg(column_name order by ordinal_position), '[]'::jsonb) from information_schema.columns where table_schema='auth' and table_name=:'table_name'")"
+            rows="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtq -c "select count(*) from auth.\"$table\"")"
+            auth_json="$(jq -c --arg table "$table" --argjson columns "$columns" --argjson rows "$rows" \
+              '. + {($table): {columns: $columns, rows: $rows}}' <<<"$auth_json")"
+          done
+
+          database_sha="$(sha256sum "$workdir/database.dump" | cut -d' ' -f1)"
+          auth_sha="$(sha256sum "$workdir/auth-data.dump" | cut -d' ' -f1)"
+          globals_sha="$(sha256sum "$workdir/globals.sql" | cut -d' ' -f1)"
+          server_version="$(psql "$PORTFOLIOAI_DATABASE_URL" -XAtqc 'show server_version')"
+          client_version="$(pg_dump --version | sed 's/^pg_dump (PostgreSQL) //')"
+
+          jq -n \
+            --arg format_version "1" \
+            --arg created_at "$timestamp" \
+            --arg source_project_ref "$PORTFOLIOAI_SUPABASE_PROJECT_REF" \
+            --arg object_key "$object_key" \
+            --arg server_version "$server_version" \
+            --arg client_version "$client_version" \
+            --argjson extensions "$extension_json" \
+            --argjson public_tables "$table_json" \
+            --argjson auth_tables "$auth_json" \
+            --arg database_sha "$database_sha" \
+            --arg auth_sha "$auth_sha" \
+            --arg globals_sha "$globals_sha" \
+            --argjson database_size "$(stat -c%s "$workdir/database.dump")" \
+            --argjson auth_size "$(stat -c%s "$workdir/auth-data.dump")" \
+            --argjson globals_size "$(stat -c%s "$workdir/globals.sql")" \
+            '{format_version:$format_version, created_at_utc:$created_at, source_project_ref:$source_project_ref,
+              storage_object_key:$object_key, postgres_server_major:17, postgres_server_version:$server_version,
+              pg_dump_version:$client_version, included_schemas:["public"], extensions:$extensions,
+              public_tables:$public_tables, auth_tables:$auth_tables,
+              files:{"database.dump":{sha256:$database_sha,size:$database_size},
+                     "auth-data.dump":{sha256:$auth_sha,size:$auth_size},
+                     "globals.sql":{sha256:$globals_sha,size:$globals_size}}}' \
+            > "$workdir/manifest.json"
+
+          cat > "$workdir/RESTORE-README.txt" <<'README'
+          This archive contains sensitive PortfolioAI database and Auth data.
+          Keep it private. Restore only with scripts/restore-portfolioai-backup.sh
+          and docs/database-backup-and-recovery.md from the matching repository.
+          Supabase-managed Auth DDL, extension DDL, and physical Storage objects
+          are not restored automatically.
+          README
+
+          tar -C "$workdir" -cf "$workdir/backup.tar" \
+            database.dump auth-data.dump globals.sql manifest.json RESTORE-README.txt
+          age --encrypt --recipient "$PORTFOLIOAI_AGE_RECIPIENT" \
+            --output "$workdir/portfolioai-db-${timestamp}.tar.age" "$workdir/backup.tar"
+          cipher_sha="$(sha256sum "$workdir/portfolioai-db-${timestamp}.tar.age" | cut -d' ' -f1)"
+          cipher_size="$(stat -c%s "$workdir/portfolioai-db-${timestamp}.tar.age")"
+
+          aws s3 cp "$workdir/portfolioai-db-${timestamp}.tar.age" \
+            "s3://${PORTFOLIOAI_BACKUP_BUCKET}/${object_key}" \
+            --endpoint-url "$endpoint" --only-show-errors
+          remote_size="$(aws s3api head-object \
+            --bucket "$PORTFOLIOAI_BACKUP_BUCKET" --key "$object_key" \
+            --endpoint-url "$endpoint" --query ContentLength --output text)"
+          test "$remote_size" = "$cipher_size" || { echo "Remote size verification failed." >&2; exit 1; }
+
+          {
+            echo "### PortfolioAI encrypted database backup"
+            echo ""
+            echo "- Private Storage object: \`$object_key\`"
+            echo "- Ciphertext SHA-256: \`$cipher_sha\`"
+            echo "- Encrypted size: $cipher_size bytes"
+            echo ""
+            echo "**Download this encrypted file to your local computer now. The backup is not disaster-independent until that download is complete.**"
+          } >> "$GITHUB_STEP_SUMMARY"
